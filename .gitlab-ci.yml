@@ -1,0 +1,76 @@
+# GitLab CI configuration for Hodor code review
+#
+# This pipeline automatically reviews merge requests and posts the review as a comment.
+#
+# Required CI/CD Variables (Settings → CI/CD → Variables):
+# - ANTHROPIC_API_KEY or OPENAI_API_KEY: Your LLM API key
+# - GITLAB_TOKEN: GitLab personal access token with 'api' or 'read_api' scope
+#
+# Optional Variables:
+# - HODOR_MODEL: LLM model to use (default: gpt-5)
+
+stages:
+  - review
+
+# Recommended: Using Docker image (faster, smaller)
+hodor-review:
+  stage: review
+  image: ghcr.io/mr-karan/hodor:latest
+
+  # Only run on merge request events
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+  script:
+    # Construct the MR URL from GitLab CI variables
+    - MR_URL="${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}"
+    - echo "Reviewing merge request: $MR_URL"
+
+    # Set model from environment variable or use default
+    - MODEL="${HODOR_MODEL:-gpt-5}"
+
+    # Run hodor review with --post-comment flag
+    - |
+      hodor "$MR_URL" \
+        --model "$MODEL" \
+        --token "$GITLAB_TOKEN" \
+        --post-comment \
+        -v
+
+  # Allow failure so MR isn't blocked if review fails
+  allow_failure: true
+
+  # Timeout after 15 minutes
+  timeout: 15m
+
+# Alternative: Build from source (use if Docker image not available yet)
+# Uncomment this and comment out the above job to build from source
+#
+# hodor-review:
+#   stage: review
+#   image: python:3.11-slim
+#
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+#
+#   before_script:
+#     - pip install uv
+#     - git clone https://github.com/mr-karan/hodor.git
+#     - cd hodor
+#     - uv venv
+#     - uv pip install -e .
+#     - cd ..
+#
+#   script:
+#     - MR_URL="${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}"
+#     - MODEL="${HODOR_MODEL:-gpt-5}"
+#     - |
+#       cd hodor
+#       uv run hodor "$MR_URL" \
+#         --model "$MODEL" \
+#         --token "$GITLAB_TOKEN" \
+#         --post-comment \
+#         -v
+#
+#   allow_failure: true
+#   timeout: 15m
