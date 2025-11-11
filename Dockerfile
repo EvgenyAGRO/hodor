@@ -13,9 +13,14 @@ COPY .python-version pyproject.toml uv.lock README.md ./
 # Copy source code
 COPY hodor ./hodor
 
+# Set UV_PROJECT_ENVIRONMENT to create venv at final location
+# This avoids path issues in multi-stage builds
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+
 # Sync dependencies using modern uv workflow
-# This uses the lock file for reproducible builds
-RUN uv sync --no-dev --frozen
+# Using --frozen to ensure lock file is respected
+# Using --no-editable for production build
+RUN uv sync --no-dev --frozen --no-editable
 
 # Final stage
 FROM python:3.13-slim
@@ -26,7 +31,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder
-COPY --from=builder /build/.venv /opt/venv
+COPY --from=builder /opt/venv /opt/venv
 
 # Copy application files
 COPY --from=builder /build /app
