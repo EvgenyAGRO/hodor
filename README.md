@@ -46,32 +46,15 @@ The agent **decides** which tools to use and when—not following a script.
 
 ---
 
-## How OpenHands Powers Hodor
-
-Hodor is built on the [OpenHands Agent SDK](https://docs.openhands.dev/sdk/arch/overview), leveraging its core components:
-
-| Component | What It Provides | How Hodor Uses It |
-|-----------|------------------|-------------------|
-| **[Agent Runtime](https://docs.openhands.dev/sdk/arch/agent)** | Reasoning-action loop, LLM orchestration | Multi-step PR analysis with planning and execution phases |
-| **[Workspace](https://docs.openhands.dev/sdk/arch/workspace)** | Sandboxed repo clones, CI detection | Clean checkouts, auto-detects GitLab CI/GitHub Actions |
-| **[Tools](https://docs.openhands.dev/sdk/arch/tool-system)** | Terminal, file ops, grep, planning | Agent autonomously selects tools to analyze code |
-| **[Skills](https://docs.openhands.dev/sdk/guides/skill)** | Repository-specific context and conventions | Apply project guidelines, custom review criteria |
-| **[Security Analyzer](https://docs.openhands.dev/sdk/guides/security)** | Risk assessment for commands | Validates bash commands before execution |
-| **[Event System](https://docs.openhands.dev/sdk/arch/events)** | Structured conversation history | Token tracking, streaming progress, metrics |
-
-**Hodor's Role**: Provides PR-specific prompts, GitHub/GitLab integration, and review formatting—OpenHands handles the agent intelligence.
-
----
-
 ## Quick Start
 
 ### 1. Install + sync
 
 ```bash
-pip install uv
+pip install uv just
 git clone https://github.com/mr-karan/hodor
 cd hodor
-uv sync
+just sync
 ```
 
 ### 2. Authenticate + configure
@@ -85,16 +68,9 @@ export LLM_API_KEY=sk-your-llm-key   # or ANTHROPIC_API_KEY/OPENAI_API_KEY
 ### 3. Run a review
 
 ```bash
-# The agent will autonomously:
-# 1. Clone the repo and checkout PR branch
-# 2. Analyze the diff to identify changed files
-# 3. Select tools (grep, file read, git) to investigate
-# 4. Reason about bugs, security, and performance issues
-# 5. Generate a structured markdown review
-
 uv run hodor https://github.com/owner/repo/pull/123
 
-# Or auto-post the review as a comment
+# Auto-post the review as a comment
 uv run hodor https://github.com/owner/repo/pull/123 --post
 
 # Watch the agent work with verbose mode
@@ -194,7 +170,7 @@ When reviewing authentication code:
 - Ensure password hashing uses bcrypt/argon2
 ```
 
-See [SKILLS.md](./SKILLS.md) for detailed examples and patterns.
+See [SKILLS.md](./docs/SKILLS.md) for detailed examples and patterns.
 
 ---
 
@@ -278,7 +254,7 @@ hodor-review:
   allow_failure: true
 ```
 
-See [AUTOMATED_REVIEWS.md](./AUTOMATED_REVIEWS.md) for advanced workflows (labels, reviewer triggers, multi-model configs).
+See [AUTOMATED_REVIEWS.md](./docs/AUTOMATED_REVIEWS.md) for advanced workflows (labels, reviewer triggers, multi-model configs).
 
 ---
 
@@ -313,14 +289,14 @@ Hodor auto-detects CI environments and skips cloning:
 
 ## Development
 
-| Command | Description |
-|---------|-------------|
-| `just sync` | Create/update the locked `uv` environment. |
-| `just check` | Format, lint, and type-check. |
-| `just test-cov` | Pytest with coverage + HTML report. |
-| `just review <PR-URL>` | Shortcut for `uv run hodor <PR-URL>`. |
+```bash
+just sync       # Install dependencies
+just check      # Format, lint, and type-check
+just test-cov   # Run tests with coverage
+just review URL # Review a PR
+```
 
-All toolchain details live in [AGENTS.md](./AGENTS.md); prompts live under `prompts/`, docs in `docs/`, and tests inside `tests/`.
+See [AGENTS.md](./AGENTS.md) for architecture details and contribution guidelines.
 
 ---
 
@@ -360,34 +336,12 @@ This visibility helps you understand:
 
 ---
 
-## Why Choose Hodor Over Other Tools?
-
-| Feature | Hodor (Agentic) | Traditional LLM Tools |
-|---------|-----------------|----------------------|
-| **Review Approach** | Multi-step reasoning with tool feedback | Single LLM call with full diff |
-| **Code Execution** | Can run tests, check builds, grep patterns | Static analysis only |
-| **Adaptability** | Adjusts strategy based on observations | Fixed workflow |
-| **Context Awareness** | Skills system + repository conventions | Generic prompts |
-| **Tool Integration** | Autonomous tool selection (bash, grep, file ops) | Manual tool scripting |
-| **Deep Analysis** | Multi-file cross-references, integration checks | Surface-level pattern matching |
-| **CI Integration** | Auto-detects environment, skips cloning | Manual workspace setup |
-
-**Real-World Impact:**
-- Catches **race conditions** by analyzing multiple files and timing logic
-- Detects **integration bugs** by checking API contracts across services
-- Finds **security issues** by tracing data flow through functions
-- Identifies **performance cliffs** by analyzing algorithmic complexity
-
-These require **multi-step reasoning** that only an agentic system can provide.
-
----
-
 ## Learn More
 
 ### Hodor Documentation
 - **[AGENTS.md](./AGENTS.md)** - Development guidelines, OpenHands architecture, workspace setup, CI integration
-- **[SKILLS.md](./SKILLS.md)** - Creating repository-specific review guidelines and trigger-based skills
-- **[AUTOMATED_REVIEWS.md](./AUTOMATED_REVIEWS.md)** - Advanced CI/CD workflows, label triggers, multi-model configs
+- **[SKILLS.md](./docs/SKILLS.md)** - Creating repository-specific review guidelines and trigger-based skills
+- **[AUTOMATED_REVIEWS.md](./docs/AUTOMATED_REVIEWS.md)** - Advanced CI/CD workflows, label triggers, multi-model configs
 
 ### OpenHands SDK Resources
 - **[Agent Architecture](https://docs.openhands.dev/sdk/arch/agent)** - How the reasoning-action loop works

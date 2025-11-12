@@ -4,7 +4,7 @@
 - The runtime package lives in `hodor/`: `cli.py` exposes the Click entrypoint, `agent.py` manages the review loop using OpenHands SDK
 - `workspace.py` handles repo cloning, CI detection, and PR branch checkout for GitHub and GitLab
 - `llm/openhands_client.py` wraps the OpenHands SDK with proper model configuration and LLM provider setup
-- `prompts/pr_review_prompt.py` contains the 3-step PR review process (get diff → review only changed files → analyze)
+- `hodor/prompts/pr_review_prompt.py` contains the 3-step PR review process (get diff → review only changed files → analyze)
 - `tools/` and `utils/` host integration helpers (GitHub/GitLab CLIs) and shared logic (file classification)
 - Keep credentials and local overrides out of git by editing `.env` (mirrors `.env.example`)
 - New tests and fixtures should land in `tests/`, which pytest auto-discovers via `test_*.py`

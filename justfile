@@ -1,78 +1,55 @@
-# Justfile for Hodor development tasks
-# Install just: https://github.com/casey/just
-
-# Default recipe to display help information
 default:
     @just --list
 
-# Sync dependencies (creates venv, installs deps, generates lock file)
+# Install dependencies
 sync:
-    uv sync
-
-# Sync with all optional dependencies including dev
-sync-all:
     uv sync --all-extras
 
-# Format code with black
+# Format code
 fmt:
     uv tool run black hodor
 
-# Check code formatting without making changes
-fmt-check:
-    uv tool run black --check hodor
-
-# Lint code with ruff
+# Lint code
 lint:
     uv tool run ruff check hodor
 
-# Lint and attempt to fix issues
+# Fix lint issues
 lint-fix:
     uv tool run ruff check --fix hodor
 
-# Type check with mypy
+# Type check
 typecheck:
     uv tool run mypy hodor
 
-# Run all checks (format, lint, type)
-check: fmt-check lint typecheck
+# Run all checks
+check: fmt lint typecheck
 
-# Format and lint fix
+# Auto-fix formatting and linting
 fix: fmt lint-fix
 
 # Run tests
 test:
     uv run pytest
 
-# Run tests with coverage
+# Run tests with coverage report
 test-cov:
     uv run pytest --cov=hodor --cov-report=html --cov-report=term-missing
 
-# Run tests in watch mode (requires pytest-watch)
-test-watch:
-    uv tool run pytest-watch
-
-# Clean up build artifacts and cache
+# Clean build artifacts and caches
 clean:
-    rm -rf build/
-    rm -rf dist/
-    rm -rf *.egg-info
-    rm -rf .pytest_cache/
-    rm -rf .mypy_cache/
-    rm -rf .ruff_cache/
-    rm -rf htmlcov/
-    rm -rf .coverage
+    rm -rf build/ dist/ *.egg-info .pytest_cache/ .mypy_cache/ .ruff_cache/ htmlcov/ .coverage
     find . -type d -name __pycache__ -exec rm -rf {} +
     find . -type f -name "*.pyc" -delete
 
-# Build Docker image locally (single platform, loaded to Docker)
+# Build distribution
+build:
+    uv build
+
+# Build Docker image
 docker-build:
     docker buildx build --load -t hodor:local .
 
-# Build and push image to registry (amd64 only)
-docker-push REGISTRY:
-    docker buildx build --platform linux/amd64 -t {{REGISTRY}} --push .
-
-# Run hodor with Docker
+# Run with Docker
 docker-run URL:
     docker run --rm \
         -e ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-} \
@@ -81,24 +58,9 @@ docker-run URL:
         -e GITLAB_TOKEN=${GITLAB_TOKEN:-} \
         hodor:local {{URL}}
 
-# Review a PR (shortcut for uv run)
+# Review PR
 review URL *ARGS:
     uv run hodor {{URL}} {{ARGS}}
 
-# Start IPython shell with hodor loaded
-shell:
-    uv run ipython -i -c "from hodor import agent, tools"
-
-# Build distribution packages
-build:
-    python -m build
-
-# Show project info
-info:
-    @echo "Hodor - AI-powered code review agent"
-    @echo "=========================================="
-    @uv pip list | grep -E "(hodor|openhands|anthropic)"
-
-# Run all checks and tests before committing
+# Pre-commit checks
 pre-commit: fix check test
-    @echo "✅ All checks passed! Ready to commit."

@@ -89,7 +89,7 @@ def parse_llm_args(ctx, param, value):
     "--prompt-file",
     default=None,
     type=click.Path(exists=True),
-    help="Path to file containing custom prompt (see prompts/ directory for examples)",
+    help="Path to file containing custom prompt instructions",
 )
 @click.option(
     "--workspace",

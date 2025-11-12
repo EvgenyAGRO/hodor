@@ -182,8 +182,8 @@ Override the default review prompt:
 # Inline prompt
 uv run hodor $PR_URL --prompt "Focus on security issues only..."
 
-# From file
-uv run hodor $PR_URL --prompt-file prompts/security-focused.txt
+# From file (create your own custom prompt file)
+uv run hodor $PR_URL --prompt-file custom-prompt.txt
 ```
 
 ## Cost Optimization
@@ -369,7 +369,7 @@ Upcoming features for automated reviews:
 
 ## Support
 
-- **Documentation**: See [README.md](./README.md) and [SKILLS.md](./SKILLS.md)
+- **Documentation**: See [README.md](../README.md) and [SKILLS.md](./SKILLS.md)
 - **Issues**: Report bugs at https://github.com/mr-karan/hodor/issues
 - **Questions**: Start a discussion at https://github.com/mr-karan/hodor/discussions
 
