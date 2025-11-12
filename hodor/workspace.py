@@ -21,6 +21,46 @@ class WorkspaceError(Exception):
     pass
 
 
+def _detect_ci_workspace(owner: str, repo: str, pr_number: str) -> Path | None:
+    """Detect if running in CI environment with repo already cloned.
+
+    Checks for GitLab CI and GitHub Actions environments.
+
+    Args:
+        owner: Repository owner/group
+        repo: Repository name
+        pr_number: Pull/merge request number
+
+    Returns:
+        Path to existing workspace if in CI, None otherwise
+    """
+    # GitLab CI detection
+    if os.getenv("GITLAB_CI") == "true":
+        project_dir = os.getenv("CI_PROJECT_DIR")
+        project_path = os.getenv("CI_PROJECT_PATH")  # e.g., "group/subgroup/repo"
+        mr_iid = os.getenv("CI_MERGE_REQUEST_IID")
+
+        if project_dir and project_path:
+            # Check if this matches our target repo
+            expected_path = f"{owner}/{repo}"
+            if project_path == expected_path or project_path.endswith(f"/{expected_path}"):
+                logger.info(f"Detected GitLab CI environment (MR IID: {mr_iid})")
+                return Path(project_dir)
+
+    # GitHub Actions detection
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        workspace_dir = os.getenv("GITHUB_WORKSPACE")
+        repository = os.getenv("GITHUB_REPOSITORY")  # e.g., "owner/repo"
+
+        if workspace_dir and repository:
+            expected_repo = f"{owner}/{repo}"
+            if repository == expected_repo:
+                logger.info("Detected GitHub Actions environment")
+                return Path(workspace_dir)
+
+    return None
+
+
 def _is_same_repo(workspace: Path, platform: Platform, owner: str, repo: str) -> bool:
     """Check if workspace contains the same repository.
 
@@ -60,6 +100,7 @@ def setup_workspace(
     owner: str,
     repo: str,
     pr_number: str,
+    host: str | None = None,
     base_branch: str | None = None,
     working_dir: Path | None = None,
     reuse: bool = True,
@@ -71,6 +112,7 @@ def setup_workspace(
         owner: Repository owner/group
         repo: Repository name
         pr_number: Pull request number
+        host: Git host (e.g., 'github.com', 'gitlab.example.com'). Optional, uses default if not provided.
         base_branch: Base branch name (optional, auto-detected if not provided)
         working_dir: Directory to use (if None, creates temp directory)
         reuse: If True and workspace exists with same repo, reuse it (faster)
@@ -82,7 +124,12 @@ def setup_workspace(
         WorkspaceError: If setup fails
     """
     try:
-        if working_dir is None:
+        # Check if running in CI environment with repo already cloned
+        ci_workspace = _detect_ci_workspace(owner, repo, pr_number)
+        if ci_workspace:
+            workspace = ci_workspace
+            # Skip cloning, just setup the PR branch
+        elif working_dir is None:
             workspace = Path(tempfile.mkdtemp(prefix="hodor-review-"))
             logger.info(f"Created temporary workspace: {workspace}")
         else:
@@ -103,19 +150,25 @@ def setup_workspace(
             else:
                 logger.info(f"Using workspace: {workspace}")
 
-        if platform == "github":
-            _setup_github_workspace(workspace, owner, repo, pr_number)
-        elif platform == "gitlab":
-            _setup_gitlab_workspace(workspace, owner, repo, pr_number)
-        else:
-            raise WorkspaceError(f"Unsupported platform: {platform}")
+        # Skip workspace setup entirely if in CI (repo already cloned and on the right branch)
+        if not ci_workspace:
+            if platform == "github":
+                _setup_github_workspace(workspace, owner, repo, pr_number)
+            elif platform == "gitlab":
+                _setup_gitlab_workspace(workspace, owner, repo, pr_number, host)
+            else:
+                raise WorkspaceError(f"Unsupported platform: {platform}")
 
         logger.info(f"Workspace ready at: {workspace}")
         return workspace
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed: {e.cmd}")
-        logger.error(f"Output: {e.output if hasattr(e, 'output') else 'N/A'}")
+        logger.error(f"Exit code: {e.returncode}")
+        if hasattr(e, 'stdout') and e.stdout:
+            logger.error(f"Stdout: {e.stdout}")
+        if hasattr(e, 'stderr') and e.stderr:
+            logger.error(f"Stderr: {e.stderr}")
         raise WorkspaceError(f"Failed to setup workspace: {e}") from e
     except Exception as e:
         logger.error(f"Workspace setup failed: {e}")
@@ -219,18 +272,20 @@ def _setup_github_workspace(workspace: Path, owner: str, repo: str, pr_number: s
         os.chdir(original_dir)
 
 
-def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: str) -> None:
+def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: str, host: str | None = None) -> None:
     """Setup GitLab MR workspace using glab CLI.
 
-    Supports self-hosted GitLab instances via GITLAB_HOST environment variable.
+    Supports self-hosted GitLab instances via host parameter or GITLAB_HOST environment variable.
 
     Args:
         workspace: Target workspace directory
         owner: Repository owner/group
         repo: Repository name
         pr_number: Merge request number
+        host: GitLab host (e.g., 'gitlab.com', 'gitlab.example.com'). Falls back to GITLAB_HOST env var or 'gitlab.com'.
     """
-    gitlab_host = os.getenv("GITLAB_HOST", "gitlab.com")
+    # Priority: host parameter > GITLAB_HOST env var > default to gitlab.com
+    gitlab_host = host or os.getenv("GITLAB_HOST", "gitlab.com")
     logger.info(f"Setting up GitLab workspace for {owner}/{repo}/merge_requests/{pr_number}")
     logger.info(f"GitLab host: {gitlab_host}")
 

@@ -41,23 +41,25 @@ def detect_platform(pr_url: str) -> Platform:
         return "github"
 
 
-def parse_pr_url(pr_url: str) -> tuple[str, str, int]:
+def parse_pr_url(pr_url: str) -> tuple[str, str, int, str]:
     """
-    Parse PR/MR URL to extract owner, repo, and PR/MR number.
+    Parse PR/MR URL to extract owner, repo, PR/MR number, and host.
 
     Examples:
-        GitHub: https://github.com/owner/repo/pull/123 -> ('owner', 'repo', 123)
-        GitLab: https://gitlab.com/owner/repo/-/merge_requests/123 -> ('owner', 'repo', 123)
+        GitHub: https://github.com/owner/repo/pull/123 -> ('owner', 'repo', 123, 'github.com')
+        GitLab: https://gitlab.com/owner/repo/-/merge_requests/123 -> ('owner', 'repo', 123, 'gitlab.com')
+        Self-hosted: https://gitlab.example.com/group/repo/-/merge_requests/118 -> ('group', 'repo', 118, 'gitlab.example.com')
     """
     parsed = urlparse(pr_url)
     path_parts = [p for p in parsed.path.split("/") if p]
+    host = parsed.netloc
 
     # GitHub format: /owner/repo/pull/123
     if len(path_parts) >= 4 and path_parts[2] == "pull":
         owner = path_parts[0]
         repo = path_parts[1]
         pr_number = int(path_parts[3])
-        return owner, repo, pr_number
+        return owner, repo, pr_number, host
 
     # GitLab format: /group/subgroup/repo/-/merge_requests/123
     elif "merge_requests" in path_parts:
@@ -71,7 +73,7 @@ def parse_pr_url(pr_url: str) -> tuple[str, str, int]:
         owner_parts = path_parts[: mr_index - 2]
         owner = "/".join(owner_parts) if owner_parts else path_parts[0]
         pr_number = int(path_parts[mr_index + 1])
-        return owner, repo, pr_number
+        return owner, repo, pr_number, host
 
     else:
         raise ValueError(
@@ -99,7 +101,7 @@ def post_review_comment(
     logger.info(f"Posting comment to {platform} PR/MR: {pr_url}")
 
     try:
-        owner, repo, pr_number = parse_pr_url(pr_url)
+        owner, repo, pr_number, host = parse_pr_url(pr_url)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -201,13 +203,13 @@ def review_pr(
 
     # Parse PR URL
     try:
-        owner, repo, pr_number = parse_pr_url(pr_url)
+        owner, repo, pr_number, host = parse_pr_url(pr_url)
         platform = detect_platform(pr_url)
     except ValueError as e:
         logger.error(f"Invalid PR URL: {e}")
         raise
 
-    logger.info(f"Platform: {platform}, Repo: {owner}/{repo}, PR: {pr_number}")
+    logger.info(f"Platform: {platform}, Repo: {owner}/{repo}, PR: {pr_number}, Host: {host}")
 
     # Create OpenHands agent
     try:
@@ -230,6 +232,7 @@ def review_pr(
             owner=owner,
             repo=repo,
             pr_number=str(pr_number),
+            host=host,
             working_dir=workspace_dir,
             reuse=workspace_dir is not None,  # Only reuse if user specified a workspace dir
         )
@@ -254,87 +257,6 @@ def review_pr(
         if workspace and cleanup:
             cleanup_workspace(workspace)
         raise RuntimeError(f"Failed to build prompt: {e}") from e
-
-    # Create conversation and run agent
-    # NOTE: Temporary workaround for NixOS compatibility (where bash is not at /bin/bash)
-    # TODO: Remove this once OpenHands SDK adds bash_path parameter to SubprocessTerminal
-    #       See https://github.com/OpenHands/agent-sdk/issues/TBD
-    import shutil
-
-    bash_path = shutil.which("bash") or "/bin/bash"
-    if bash_path != "/bin/bash":
-        logger.debug(f"Patching SubprocessTerminal for NixOS (bash at {bash_path})")
-        try:
-            from openhands.tools.terminal.terminal import subprocess_terminal
-
-            original_initialize = subprocess_terminal.SubprocessTerminal.initialize
-
-            def patched_initialize(self):
-                if self._initialized:
-                    return
-                import fcntl
-                import pty
-                import threading
-                import uuid
-
-                env = os.environ.copy()
-                env["PS1"] = self.PS1
-                env["PS2"] = ""
-                env["TERM"] = "xterm-256color"
-                bash_cmd = [bash_path, "-i"]  # Use discovered bash instead of /bin/bash
-                master_fd, slave_fd = pty.openpty()
-
-                logger.debug("Initializing PTY with: %s", " ".join(bash_cmd))
-                try:
-                    self.process = subprocess.Popen(
-                        bash_cmd,
-                        stdin=slave_fd,
-                        stdout=slave_fd,
-                        stderr=slave_fd,
-                        cwd=self.work_dir,
-                        env=env,
-                        text=False,
-                        bufsize=0,
-                        preexec_fn=os.setsid,  # New process group
-                        close_fds=True,
-                    )
-                finally:
-                    try:
-                        os.close(slave_fd)
-                    except Exception:
-                        pass
-
-                self._pty_master_fd = master_fd
-
-                # Set master FD non-blocking
-                flags = fcntl.fcntl(self._pty_master_fd, fcntl.F_GETFL)
-                fcntl.fcntl(self._pty_master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-                # Start output reader thread
-                self.reader_thread = threading.Thread(
-                    target=self._read_output_continuously_pty, daemon=True
-                )
-                self.reader_thread.start()
-                self._initialized = True
-
-                # Deterministic readiness check with sentinel
-                sentinel = f"__OH_READY_{uuid.uuid4().hex}__"
-                from openhands.tools.terminal.terminal.subprocess_terminal import ENTER
-
-                init_cmd = (
-                    f"export PROMPT_COMMAND='export PS1=\"{self.PS1}\"'; "
-                    f'export PS2=""; '
-                    f'printf "{sentinel}"'
-                ).encode("utf-8", "ignore")
-
-                self._write_pty(init_cmd + ENTER)
-                if not self._wait_for_output(sentinel, timeout=8.0):
-                    raise RuntimeError("PTY did not become ready within timeout")
-
-            subprocess_terminal.SubprocessTerminal.initialize = patched_initialize
-            logger.info(f"Applied NixOS patch (bash: {bash_path})")
-        except Exception as e:
-            logger.warning(f"Failed to patch SubprocessTerminal: {e}")
 
     #  Event callback for monitoring agent progress
     def on_event(event: Any) -> None:

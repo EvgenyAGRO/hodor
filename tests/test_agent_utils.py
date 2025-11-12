@@ -16,18 +16,20 @@ def test_detect_platform(url, expected):
 
 
 def test_parse_pr_url_github():
-    owner, repo, number = parse_pr_url("https://github.com/octo/hoDor/pull/123")
+    owner, repo, number, host = parse_pr_url("https://github.com/octo/hoDor/pull/123")
     assert owner == "octo"
     assert repo == "hoDor"
     assert number == 123
+    assert host == "github.com"
 
 
 def test_parse_pr_url_gitlab_subgroups():
     url = "https://gitlab.example.com/org/security/tools/hodor/-/merge_requests/99"
-    owner, repo, number = parse_pr_url(url)
+    owner, repo, number, host = parse_pr_url(url)
     assert owner == "org/security/tools"
     assert repo == "hodor"
     assert number == 99
+    assert host == "gitlab.example.com"
 
 
 def test_parse_pr_url_invalid():

@@ -68,21 +68,17 @@ clean:
 docker-build:
     docker buildx build --load -t hodor:local .
 
-# Build Docker image for multiple platforms (amd64 + arm64) - for registry push
-docker-build-multi:
-    docker buildx build --platform linux/amd64,linux/arm64 -t hodor:local .
-
-# Build and push multi-platform image to registry
+# Build and push image to registry (amd64 only)
 docker-push REGISTRY:
-    docker buildx build --platform linux/amd64,linux/arm64 -t {{REGISTRY}} --push .
+    docker buildx build --platform linux/amd64 -t {{REGISTRY}} --push .
 
 # Run hodor with Docker
 docker-run URL:
     docker run --rm \
-        -e ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY} \
-        -e OPENAI_API_KEY=${OPENAI_API_KEY} \
-        -e GITHUB_TOKEN=${GITHUB_TOKEN} \
-        -e GITLAB_TOKEN=${GITLAB_TOKEN} \
+        -e ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-} \
+        -e OPENAI_API_KEY=${OPENAI_API_KEY:-} \
+        -e GITHUB_TOKEN=${GITHUB_TOKEN:-} \
+        -e GITLAB_TOKEN=${GITLAB_TOKEN:-} \
         hodor:local {{URL}}
 
 # Review a PR (shortcut for uv run)
