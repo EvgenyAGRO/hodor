@@ -42,9 +42,9 @@ Use the **skills system** to encode your team's standards:
 
 ```bash
 # In your repository root
-.cursorrules                    # Project-wide review guidelines
-agents.md                       # Alternative location
-.openhands/skills/              # Modular skills (security, performance, etc.)
+.cursorrules                    # Simple, single-file project guidelines
+agents.md                       # Alternative single-file location
+.hodor/skills/*.md              # Modular skills organized by topic
 ```
 
 See [SKILLS.md](./SKILLS.md) for detailed documentation.

@@ -37,13 +37,23 @@ Create a `.cursorrules` file in your repository root:
 
 ## Skills System Overview
 
-OpenHands supports three types of skills that Hodor can leverage:
+Hodor automatically loads repository-specific review guidelines through the OpenHands skills system. Skills are injected into the agent's context when reviewing PRs.
 
-### 1. Repository Skills (Always Active)
+### Supported Skill Locations
 
-These skills are loaded automatically when Hodor reviews your PR:
+Hodor looks for skills in these locations (in priority order):
 
-**Location**: `.cursorrules` or `agents.md` or `.openhands/skills/*.md` in repository root
+1. **`.cursorrules`** - Simple, single-file project guidelines
+2. **`agents.md` or `agent.md`** - Alternative single-file location
+3. **`.hodor/skills/*.md`** - Modular skills (multiple files organized by topic)
+
+All files are loaded automatically when the workspace is set up. No configuration needed.
+
+### 1. Simple Skills (Single File)
+
+Use `.cursorrules` for straightforward project guidelines:
+
+**Location**: `.cursorrules` in repository root
 
 **Format**:
 ```markdown
@@ -52,15 +62,15 @@ These skills are loaded automatically when Hodor reviews your PR:
 Your project-specific instructions here...
 ```
 
-**When Loaded**: Automatically when workspace is set up
+**When Loaded**: Automatically on every PR review
 
-**Use Case**: Project-wide review guidelines that apply to every PR
+**Use Case**: Project-wide conventions that apply to all PRs
 
-### 2. Keyword-Triggered Skills
+### 2. Modular Skills (Multiple Files)
 
-Skills that activate when specific keywords appear in the PR:
+Use `.hodor/skills/` for organized, topic-specific guidelines:
 
-**Location**: `.openhands/skills/SKILL_NAME.md`
+**Location**: `.hodor/skills/TOPIC.md`
 
 **Format**:
 ```markdown
@@ -84,11 +94,20 @@ When reviewing security-related changes:
 
 **Use Case**: Domain-specific checks (security, performance, database, etc.)
 
-### 3. Task Skills (User Input)
+**Format**:
+```markdown
+# Security Review Guidelines
 
-Skills that require additional context from the user:
+Security-specific checks for authentication, authorization, data validation...
+```
 
-**Location**: `.openhands/skills/TASK_NAME.md`
+**When Loaded**: Automatically with all other skills
+
+**Use Case**: Organize guidelines by domain (security, performance, database, testing, etc.)
+
+### 3. Advanced: Triggered Skills (Not Yet Supported)
+
+Future enhancement - skills that activate based on PR keywords:
 
 **Format**:
 ```markdown
@@ -170,18 +189,8 @@ Verify PR implements requirements from ticket {{ticket_id}}...
 
 ### Example 3: Security-Focused Review
 
-**.openhands/skills/security-review.md**:
+**.hodor/skills/security.md**:
 ```markdown
----
-triggers:
-  - security
-  - auth
-  - authentication
-  - password
-  - token
-  - crypto
----
-
 # Security Review Checklist
 
 When reviewing security-related code:
@@ -212,17 +221,8 @@ When reviewing security-related code:
 
 ### Example 4: Database Review
 
-**.openhands/skills/database-review.md**:
+**.hodor/skills/database.md**:
 ```markdown
----
-triggers:
-  - database
-  - migration
-  - schema
-  - query
-  - sql
----
-
 # Database Change Review
 
 ## Schema Changes
@@ -246,18 +246,13 @@ triggers:
 
 ## Advanced: MCP Integration
 
-For even more powerful reviews, you can integrate MCP (Model Context Protocol) tools:
+*(Not yet implemented)* Future enhancement - integrate MCP (Model Context Protocol) tools for richer context:
 
-**.openhands/skills/github-integration.md**:
+**.hodor/skills/github-integration.md**:
 ```markdown
----
-mcp_servers:
-  - github
----
+# GitHub Integration Review (Future)
 
-# GitHub Integration Review
-
-This skill uses the GitHub MCP server to fetch additional context:
+Could fetch additional context via MCP:
 - Previous PRs by the same author
 - Related issues and discussions
 - CI/CD check results
@@ -269,13 +264,14 @@ This skill uses the GitHub MCP server to fetch additional context:
 When Hodor starts a review:
 
 1. **Workspace Setup**: Clone repo and checkout PR branch
-2. **Skill Discovery**: Scan for:
-   - `.cursorrules` (priority 1)
-   - `agents.md` or `agent.md` (priority 2)
-   - `.openhands/skills/*.md` (priority 3)
-3. **Keyword Matching**: Check PR title/description against skill triggers
-4. **Context Building**: Combine all active skills into agent context
-5. **Review**: Agent uses combined knowledge to review code
+2. **Skill Discovery** (via OpenHands SDK): Scan for:
+   - `.cursorrules` (simple, single-file guidelines)
+   - `agents.md` or `agent.md` (alternative single-file location)
+   - `.hodor/skills/*.md` (modular, multi-file guidelines)
+3. **Context Building**: All discovered skills are combined into the agent's system prompt
+4. **Review**: Agent uses combined guidelines to review the PR
+
+**Note**: All skills are loaded on every review. Keyword-based triggering is not yet implemented.
 
 ## Best Practices
 
@@ -308,10 +304,10 @@ hodor https://github.com/owner/repo/pull/123 --verbose
 
 ### Skills Not Loading?
 
-1. Check file location (must be in repo root or `.openhands/skills/`)
-2. Verify filename (`.cursorrules`, `agents.md`, or `.openhands/skills/*.md`)
-3. Ensure proper YAML front matter for triggered skills
-4. Run with `--verbose` to see what Hodor loads
+1. Check file location (must be in repo root or `.hodor/skills/`)
+2. Verify filename (`.cursorrules`, `agents.md`, or `.hodor/skills/*.md`)
+3. Ensure files are in the repository being reviewed (not in Hodor's repo)
+4. Run with `--verbose` and check agent logs for skill discovery
 
 ### Skills Too Generic?
 

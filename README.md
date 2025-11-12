@@ -126,10 +126,10 @@ Skills inject **repository-specific context** into the agent's system prompt:
 
 **1. Create a skills directory:**
 ```bash
-mkdir -p .hodor/skills/repo
+mkdir -p .hodor/skills
 ```
 
-**2. Add a skill file (`.hodor/skills/repo/conventions.txt`):**
+**2. Add a skill file (`.hodor/skills/conventions.md`):**
 ```markdown
 # Code Review Guidelines for MyProject
 
@@ -154,21 +154,27 @@ mkdir -p .hodor/skills/repo
 hodor <PR_URL> --workspace . --verbose
 ```
 
-The agent will automatically load skills from `.hodor/skills/repo/` and apply them during review.
+The agent will automatically load skills from `.hodor/skills/` and apply them during review.
 
-### Advanced: Trigger-Based Skills
+### Organizing Skills by Topic
 
-Create **knowledge skills** that activate based on keywords:
+Organize guidelines into separate files by domain:
 
 ```bash
-# .hodor/skills/knowledge/auth.txt
-trigger: authentication, login, session
----
-When reviewing authentication code:
+# .hodor/skills/security.md
+When reviewing security-related code:
 - Check for timing-safe comparison of credentials
 - Verify session expiration handling
 - Ensure password hashing uses bcrypt/argon2
+
+# .hodor/skills/performance.md
+Performance requirements:
+- API responses < 200ms p95
+- No N+1 queries in loops
+- Database queries must have appropriate indexes
 ```
+
+All files in `.hodor/skills/` are loaded automatically on every review.
 
 See [SKILLS.md](./docs/SKILLS.md) for detailed examples and patterns.
 
