@@ -9,7 +9,9 @@
 #    - GITLAB_TOKEN: Personal/Project access token with 'api' scope
 #
 # 2. (Optional) Set these variables for customization:
-#    - HODOR_MODEL: Model to use (default: anthropic/claude-sonnet-4-5)
+#    - HODOR_MODEL: Model to use (default: anthropic/claude-sonnet-4-5-20250929)
+#      Recommended: anthropic/claude-sonnet-4-20250514, anthropic/claude-sonnet-4-5-20250929,
+#                   openai/gpt-5-2025-08-07, gemini/gemini-2.5-pro, deepseek/deepseek-chat
 #    - HODOR_VERBOSE: Set to "true" for detailed logs
 #
 # 🔐 Token Authentication Options:
@@ -46,7 +48,7 @@ hodor-review:
     entrypoint: [""]  # Override to allow shell commands
 
   variables:
-    HODOR_MODEL: "anthropic/claude-sonnet-4-5"
+    HODOR_MODEL: "anthropic/claude-sonnet-4-5-20250929"
     HODOR_VERBOSE: "false"
 
   rules:
@@ -95,7 +97,7 @@ hodor-review:
 #     entrypoint: [""]
 #
 #   variables:
-#     HODOR_MODEL: "anthropic/claude-sonnet-4-5"
+#     HODOR_MODEL: "anthropic/claude-sonnet-4-5-20250929"
 #     HODOR_VERBOSE: "false"
 #
 #   rules:
@@ -140,14 +142,14 @@ hodor-review:
 # hodor-review-main:
 #   extends: hodor-review
 #   variables:
-#     HODOR_MODEL: "anthropic/claude-opus-4"  # Most thorough
+#     HODOR_MODEL: "anthropic/claude-sonnet-4-20250514"  # Most thorough
 #   rules:
 #     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"
 #
 # hodor-review-feature:
 #   extends: hodor-review
 #   variables:
-#     HODOR_MODEL: "anthropic/claude-sonnet-4-5"  # Balanced
+#     HODOR_MODEL: "openai/gpt-5-2025-08-07"  # Fast and balanced
 #   rules:
 #     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != "main"
 

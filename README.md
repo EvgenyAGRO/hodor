@@ -268,7 +268,7 @@ See [AUTOMATED_REVIEWS.md](./docs/AUTOMATED_REVIEWS.md) for advanced workflows (
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `anthropic/claude-sonnet-4-5` | Any OpenHands-compatible model (`openai/*`, `anthropic/*`, custom `LLM_BASE_URL`). |
+| `--model` | `anthropic/claude-sonnet-4-5-20250929` | LLM model to use. **Recommended**: `anthropic/claude-sonnet-4-20250514`, `anthropic/claude-sonnet-4-5-20250929`, `openai/gpt-5-2025-08-07`, `gemini/gemini-2.5-pro`, `deepseek/deepseek-chat`, `moonshot/kimi-k2-0711-preview`. Supports any [LiteLLM model](https://docs.litellm.ai/docs/providers). |
 | `--temperature` | Auto (0.0 for non-reasoning) | Override sampling temperature for LLM reasoning. |
 | `--reasoning-effort` | `none` | Enable extended thinking for complex PRs (`low`, `medium`, `high`). Agent gets more time to plan and reason. |
 | `--prompt` / `--prompt-file` | – | Append custom instructions to the agent's system prompt. |
