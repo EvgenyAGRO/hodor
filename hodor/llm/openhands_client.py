@@ -173,7 +173,7 @@ def create_hodor_agent(
     from openhands.sdk.agent.agent import Agent
     from openhands.sdk.context.agent_context import AgentContext
     from openhands.sdk.context.condenser import LLMSummarizingCondenser
-    from openhands.sdk.context.microagents.repo_microagent import RepoMicroagent
+    from openhands.sdk.context import Skill
     from openhands.sdk.tool.spec import Tool
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.glob import GlobTool
@@ -181,6 +181,11 @@ def create_hodor_agent(
     from openhands.tools.planning_file_editor import PlanningFileEditorTool
     from openhands.tools.task_tracker import TaskTrackerTool
     from openhands.tools.terminal import TerminalTool
+
+    # Set wider terminal dimensions for better output formatting in OpenHands
+    # These environment variables are inherited by the subprocess terminal
+    os.environ.setdefault("COLUMNS", "200")
+    os.environ.setdefault("LINES", "50")
 
     tools = [
         Tool(name=TerminalTool.name, params={"terminal_type": "subprocess"}),  # Bash commands
@@ -204,20 +209,20 @@ def create_hodor_agent(
     # Build agent context with repository skills if provided
     context = None
     if skills:
-        microagents = []
+        skill_objects = []
         for skill in skills:
-            microagents.append(
-                RepoMicroagent(
+            skill_objects.append(
+                Skill(
                     name=skill["name"],
                     content=skill["content"],
                     trigger=skill.get("trigger"),  # Always None for repo skills (always active)
                 )
             )
-        context = AgentContext(microagents=microagents)
+        context = AgentContext(skills=skill_objects)
 
         if verbose:
             skill_names = ", ".join([s["name"] for s in skills])
-            logger.info(f"Injecting {len(microagents)} skill(s) into agent context: {skill_names}")
+            logger.info(f"Injecting {len(skill_objects)} skill(s) into agent context: {skill_names}")
 
     agent = Agent(
         llm=llm,

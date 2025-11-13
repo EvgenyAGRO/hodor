@@ -280,8 +280,8 @@ When Hodor starts a review:
    - `.cursorrules` (simple, single-file guidelines)
    - `agents.md` or `agent.md` (alternative single-file location)
    - `.hodor/skills/*.md` (modular, multi-file guidelines)
-3. **Context Building**: Discovered skills are converted to OpenHands `RepoMicroagent` objects
-4. **Agent Creation**: `AgentContext` with microagents is injected into the OpenHands Agent
+3. **Context Building**: Discovered skills are converted to OpenHands `Skill` objects
+4. **Agent Creation**: `AgentContext` with skills is injected into the OpenHands Agent
 5. **Review**: Agent uses combined guidelines as part of its system prompt
 
 **Implementation Details**:

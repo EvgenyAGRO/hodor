@@ -40,6 +40,11 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Install ripgrep for better OpenHands grep/glob performance
+RUN curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep_15.1.0-1_amd64.deb" -o /tmp/ripgrep.deb && \
+    dpkg -i /tmp/ripgrep.deb && \
+    rm /tmp/ripgrep.deb
+
 # Install GitHub CLI (gh) - direct download from releases
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v2.83.0/gh_2.83.0_linux_amd64.tar.gz" -o /tmp/gh.tar.gz && \
     tar -xzf /tmp/gh.tar.gz -C /tmp && \
@@ -64,6 +69,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Set Python to run in unbuffered mode for better logging
 ENV PYTHONUNBUFFERED=1
+
+# Set wider terminal dimensions for better output formatting
+ENV COLUMNS=200
+ENV LINES=50
 
 # Create a non-root user for security
 RUN useradd -m -u 1000 hodor && \

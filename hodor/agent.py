@@ -136,7 +136,7 @@ def post_review_comment(
             return {"success": True, "platform": "github", "pr_number": pr_number}
 
         elif platform == "gitlab":
-            # Use glab CLI to post comment
+            # Use glab CLI to post comment with -R flag (works from any directory)
             # Note: glab needs to be authenticated for the right GitLab instance
             subprocess.run(
                 [
@@ -144,6 +144,8 @@ def post_review_comment(
                     "mr",
                     "note",
                     str(pr_number),
+                    "-R",
+                    f"{owner}/{repo}",  # Specify repo explicitly - works without being in git dir
                     "--message",
                     review_text_with_footer,
                 ],
@@ -152,7 +154,7 @@ def post_review_comment(
                 text=True,
                 env={**os.environ},  # Pass GITLAB_HOST if set
             )
-            logger.info(f"Successfully posted review to GitLab MR !{pr_number}")
+            logger.info(f"Successfully posted review to GitLab MR !{pr_number} on {owner}/{repo}")
             return {"success": True, "platform": "gitlab", "mr_number": pr_number}
 
         else:
@@ -319,7 +321,7 @@ def review_pr(
     try:
         logger.info("Creating OpenHands conversation...")
         # Use LocalWorkspace for better integration with OpenHands SDK
-        workspace_obj = LocalWorkspace(path=str(workspace))
+        workspace_obj = LocalWorkspace(working_dir=str(workspace))
         conversation = Conversation(agent=agent, workspace=workspace_obj)
 
         logger.info("Sending prompt to agent...")

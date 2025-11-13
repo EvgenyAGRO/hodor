@@ -2,6 +2,7 @@
 
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from .agent import detect_platform, post_review_comment, review_pr
+from .agent import detect_platform, parse_pr_url, post_review_comment, review_pr
 
 console = Console()
 
@@ -168,8 +169,32 @@ def main(
         )
         console.print("[dim]   Set GITHUB_TOKEN environment variable or run: gh auth login[/dim]\n")
     elif platform == "gitlab" and not gitlab_token:
-        console.print("[yellow]⚠️  Warning: GITLAB_TOKEN not set. You may encounter authentication issues.[/yellow]")
-        console.print("[dim]   Set GITLAB_TOKEN environment variable or run: glab auth login[/dim]\n")
+        # Check if glab is already authenticated for the specific GitLab host (e.g., via CI_JOB_TOKEN)
+        try:
+            # Extract the GitLab hostname from the PR URL
+            _, _, _, gitlab_host = parse_pr_url(pr_url)
+
+            # Check auth status for the specific hostname (more reliable than checking all instances)
+            result = subprocess.run(
+                ["glab", "auth", "status", "--hostname", gitlab_host, "-t"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            # If glab auth status succeeds (exit code 0), glab is authenticated for this host
+            if result.returncode != 0:
+                console.print(
+                    f"[yellow]⚠️  Warning: GITLAB_TOKEN not set and glab is not authenticated for {gitlab_host}.[/yellow]"
+                )
+                console.print(f"[dim]   Set GITLAB_TOKEN environment variable or run: glab auth login --hostname {gitlab_host}[/dim]\n")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # If glab is not installed or times out, show the warning
+            console.print("[yellow]⚠️  Warning: GITLAB_TOKEN not set. You may encounter authentication issues.[/yellow]")
+            console.print("[dim]   Set GITLAB_TOKEN environment variable or run: glab auth login[/dim]\n")
+        except ValueError:
+            # If parse_pr_url fails, just show a generic warning
+            console.print("[yellow]⚠️  Warning: GITLAB_TOKEN not set. You may encounter authentication issues.[/yellow]")
+            console.print("[dim]   Set GITLAB_TOKEN environment variable or run: glab auth login[/dim]\n")
 
     # Parse prompt file path
     prompt_file_path = Path(prompt_file) if prompt_file else None
