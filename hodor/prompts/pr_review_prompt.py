@@ -17,6 +17,7 @@ def build_pr_review_prompt(
     pr_number: str,
     platform: str,
     target_branch: str = "main",
+    diff_base_sha: str | None = None,
     custom_instructions: str | None = None,
     custom_prompt_file: Path | None = None,
 ) -> str:
@@ -29,6 +30,7 @@ def build_pr_review_prompt(
         pr_number: PR number
         platform: "github" or "gitlab"
         target_branch: Target/base branch of the PR (e.g., "main", "develop")
+        diff_base_sha: GitLab's calculated merge base SHA (most reliable for GitLab CI)
         custom_instructions: Optional custom prompt text (inline)
         custom_prompt_file: Optional path to custom prompt file
 
@@ -56,11 +58,19 @@ def build_pr_review_prompt(
         pr_view_cmd = f"gh pr view {pr_number}"
         pr_diff_cmd = f"gh pr diff {pr_number}"
         pr_checks_cmd = f"gh pr checks {pr_number}"
+        # GitHub specific diff command (fallback)
+        git_diff_cmd = f"git --no-pager diff origin/{target_branch}...HEAD"
     else:  # gitlab
         cli_tool = "glab"
         pr_view_cmd = f"glab mr view {pr_number}"
         pr_diff_cmd = f"glab mr diff {pr_number}"
         pr_checks_cmd = f"glab ci view"
+        # GitLab specific diff command - use diff_base_sha if available (most reliable)
+        if diff_base_sha:
+            git_diff_cmd = f"git --no-pager diff {diff_base_sha} HEAD"
+            logger.info(f"Using GitLab CI_MERGE_REQUEST_DIFF_BASE_SHA: {diff_base_sha[:8]}")
+        else:
+            git_diff_cmd = f"git --no-pager diff origin/{target_branch}...HEAD"
 
     prompt = f"""You are an automated code reviewer analyzing {pr_url}. PR branch is checked out.
 
@@ -79,23 +89,19 @@ This shows you the EXACT files changed in this PR. Write down the list of change
 **CRITICAL RULES:**
 - ✅ ONLY review files that appear in the diff from Step 1
 - ✅ ONLY analyze the actual code changes (+ and - lines in the diff)
-- ✅ Use three-dot diff syntax (`git --no-pager diff origin/{target_branch}...HEAD`) to see ONLY changes introduced on this branch
+- ✅ Use the most reliable diff command: `{git_diff_cmd}`
 - ❌ NEVER review files not in the diff
 - ❌ NEVER flag "files will be deleted when merging" - that's just outdated branch
 - ❌ NEVER flag "dependency version downgrade" - that's just branch not rebased
 - ❌ NEVER compare entire codebase to {target_branch} - DIFF ONLY
 
-### Git Diff Syntax (CRITICAL)
-**ALWAYS use three-dot syntax** to see only changes introduced on the source branch:
+### Git Diff Command (MOST RELIABLE)
+**Use this exact command to see changes:**
 ```bash
-git --no-pager diff origin/{target_branch}...HEAD
+{git_diff_cmd}
 ```
 
-**Why three dots?**
-- Two dots (`..`) shows ALL differences between branches (includes changes on {target_branch} not in source = false positives)
-- Three dots (`...`) shows ONLY changes since branch diverged (excludes changes already on {target_branch})
-
-This prevents false positives about "files being deleted" or "dependencies downgraded" when the branch is just not rebased.
+{'**GitLab CI Advantage**: This uses GitLab\'s pre-calculated merge base SHA (`CI_MERGE_REQUEST_DIFF_BASE_SHA`), which matches exactly what the GitLab UI shows. This is more reliable than three-dot syntax because it handles force pushes, rebases, and messy histories correctly.' if diff_base_sha else '**Three-dot syntax** shows ONLY changes introduced on the source branch, excluding changes already on ' + target_branch + '.'}
 
 **Example:**
 - Diff shows: `cmd/dump/hub.go` and `pkg/batch/batch.go` changed
@@ -122,14 +128,13 @@ Run this ONCE at the start. All subsequent git commands will output directly wit
   - Works in detached HEAD CI environments where `origin/{target_branch}` may not exist
 
 **THEN** (only for files in the diff):
-- **PREFERRED**: Use `{pr_diff_cmd}` again to see full changes for all files
-- **ALTERNATIVE**: `git --no-pager diff origin/{target_branch}...HEAD -- path/to/file` - See changes for specific file
-  - ⚠️  May fail in CI if `origin/{target_branch}` doesn't exist
-  - Only use if CLI diff command is not available
+- **MOST PREFERRED**: Use `{pr_diff_cmd}` to see full changes for all files (automatically handles target branch)
+- **ALTERNATIVE**: Use `{git_diff_cmd} -- path/to/file` to see changes for specific file
+  {'- ✅ **GitLab CI Advantage**: Uses pre-calculated merge base SHA - most reliable!' if diff_base_sha else f'- ⚠️  May fail in CI if `origin/{target_branch}` doesn\'t exist'}
 - `planning_file_editor` - Read full file with context
 - `grep` - Search for patterns in changed files only
 
-**CRITICAL**: Always prefer `{pr_diff_cmd}` over raw git commands! It's more reliable in CI environments.
+**CRITICAL**: Always prefer `{pr_diff_cmd}` over raw git commands when reviewing all changes!
 
 ## Bug Criteria (ALL must apply)
 - Meaningfully impacts production (accuracy/performance/security/maintainability)
@@ -212,7 +217,7 @@ Total issues: X critical, Y important, Z minor.
 3. **Be honest**: If code is clean, say so - don't invent issues
 4. **Focus on bugs**: Not style, formatting, or subjective preferences
 5. **Provide value**: Each issue should have clear impact and trigger
-6. **Stay on-branch**: Never file bugs that only exist because the feature branch is missing commits already present on `origin/{target_branch}`
+6. **Stay on-branch**: Never file bugs that only exist because the feature branch is missing commits already present on `{target_branch}`
 
 Start by running `{pr_diff_cmd}` and then using grep/glob to search for potential issues.
 """

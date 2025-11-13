@@ -21,7 +21,7 @@ class WorkspaceError(Exception):
     pass
 
 
-def _detect_ci_workspace(owner: str, repo: str, pr_number: str) -> tuple[Path | None, str | None]:
+def _detect_ci_workspace(owner: str, repo: str, pr_number: str) -> tuple[Path | None, str | None, str | None]:
     """Detect if running in CI environment with repo already cloned.
 
     Checks for GitLab CI and GitHub Actions environments.
@@ -32,7 +32,8 @@ def _detect_ci_workspace(owner: str, repo: str, pr_number: str) -> tuple[Path | 
         pr_number: Pull/merge request number
 
     Returns:
-        Tuple of (workspace_path, target_branch) if in CI, (None, None) otherwise
+        Tuple of (workspace_path, target_branch, diff_base_sha) if in CI, (None, None, None) otherwise
+        diff_base_sha is only available for GitLab CI (CI_MERGE_REQUEST_DIFF_BASE_SHA)
     """
     # GitLab CI detection
     if os.getenv("GITLAB_CI") == "true":
@@ -40,13 +41,17 @@ def _detect_ci_workspace(owner: str, repo: str, pr_number: str) -> tuple[Path | 
         project_path = os.getenv("CI_PROJECT_PATH")  # e.g., "group/subgroup/repo"
         mr_iid = os.getenv("CI_MERGE_REQUEST_IID")
         target_branch = os.getenv("CI_MERGE_REQUEST_TARGET_BRANCH_NAME")  # e.g., "main", "develop"
+        diff_base_sha = os.getenv("CI_MERGE_REQUEST_DIFF_BASE_SHA")  # GitLab's calculated merge base
 
         if project_dir and project_path:
             # Check if this matches our target repo
             expected_path = f"{owner}/{repo}"
             if project_path == expected_path or project_path.endswith(f"/{expected_path}"):
-                logger.info(f"Detected GitLab CI environment (MR IID: {mr_iid}, target: {target_branch or 'unknown'})")
-                return Path(project_dir), target_branch
+                logger.info(
+                    f"Detected GitLab CI environment (MR IID: {mr_iid}, target: {target_branch or 'unknown'}, "
+                    f"diff_base_sha: {diff_base_sha[:8] if diff_base_sha else 'unknown'})"
+                )
+                return Path(project_dir), target_branch, diff_base_sha
 
     # GitHub Actions detection
     if os.getenv("GITHUB_ACTIONS") == "true":
@@ -58,9 +63,9 @@ def _detect_ci_workspace(owner: str, repo: str, pr_number: str) -> tuple[Path | 
             expected_repo = f"{owner}/{repo}"
             if repository == expected_repo:
                 logger.info(f"Detected GitHub Actions environment (base: {base_ref or 'unknown'})")
-                return Path(workspace_dir), base_ref
+                return Path(workspace_dir), base_ref, None  # GitHub doesn't provide diff_base_sha
 
-    return None, None
+    return None, None, None
 
 
 def _is_same_repo(workspace: Path, platform: Platform, owner: str, repo: str) -> bool:
@@ -106,7 +111,7 @@ def setup_workspace(
     base_branch: str | None = None,
     working_dir: Path | None = None,
     reuse: bool = True,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str | None]:
     """Setup workspace by cloning repo and checking out PR branch.
 
     Args:
@@ -120,15 +125,17 @@ def setup_workspace(
         reuse: If True and workspace exists with same repo, reuse it (faster)
 
     Returns:
-        Tuple of (workspace_path, target_branch)
+        Tuple of (workspace_path, target_branch, diff_base_sha)
+        diff_base_sha is only available for GitLab CI (None for other environments)
 
     Raises:
         WorkspaceError: If setup fails
     """
     try:
         # Check if running in CI environment with repo already cloned
-        ci_workspace, ci_target_branch = _detect_ci_workspace(owner, repo, pr_number)
+        ci_workspace, ci_target_branch, ci_diff_base_sha = _detect_ci_workspace(owner, repo, pr_number)
         detected_target_branch = ci_target_branch  # Track detected target branch
+        detected_diff_base_sha = ci_diff_base_sha  # Track diff base SHA (GitLab only)
 
         if ci_workspace:
             workspace = ci_workspace
@@ -169,8 +176,11 @@ def setup_workspace(
 
         # Fallback to "main" if target branch couldn't be detected
         final_target_branch = detected_target_branch or base_branch or "main"
-        logger.info(f"Workspace ready at: {workspace} (target branch: {final_target_branch})")
-        return workspace, final_target_branch
+        logger.info(
+            f"Workspace ready at: {workspace} (target branch: {final_target_branch}, "
+            f"diff_base_sha: {detected_diff_base_sha[:8] if detected_diff_base_sha else 'N/A'})"
+        )
+        return workspace, final_target_branch, detected_diff_base_sha
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed: {e.cmd}")

@@ -218,8 +218,9 @@ def review_pr(
     # Setup workspace (clone repo and checkout PR branch)
     workspace = None
     target_branch = "main"  # Default fallback
+    diff_base_sha = None  # GitLab CI provides this for deterministic diffs
     try:
-        workspace, target_branch = setup_workspace(
+        workspace, target_branch, diff_base_sha = setup_workspace(
             platform=platform,
             owner=owner,
             repo=repo,
@@ -228,7 +229,10 @@ def review_pr(
             working_dir=workspace_dir,
             reuse=workspace_dir is not None,  # Only reuse if user specified a workspace dir
         )
-        logger.info(f"Workspace ready: {workspace} (target branch: {target_branch})")
+        logger.info(
+            f"Workspace ready: {workspace} (target branch: {target_branch}, "
+            f"diff_base_sha: {diff_base_sha[:8] if diff_base_sha else 'N/A'})"
+        )
     except Exception as e:
         logger.error(f"Failed to setup workspace: {e}")
         raise RuntimeError(f"Failed to setup workspace: {e}") from e
@@ -269,6 +273,7 @@ def review_pr(
             pr_number=str(pr_number),
             platform=platform,
             target_branch=target_branch,
+            diff_base_sha=diff_base_sha,
             custom_instructions=custom_prompt,
             custom_prompt_file=prompt_file,
         )
