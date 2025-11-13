@@ -35,21 +35,23 @@ def build_pr_review_prompt(
         platform: "github" or "gitlab"
         target_branch: Target/base branch of the PR (e.g., "main", "develop")
         diff_base_sha: GitLab's calculated merge base SHA (most reliable for GitLab CI)
-        custom_instructions: Optional custom prompt text (inline)
-        custom_prompt_file: Optional path to custom prompt file
+        custom_instructions: Optional additional instructions to append to template
+        custom_prompt_file: Optional path to custom template file (replaces base template)
 
     Returns:
         Complete prompt for OpenHands agent
     """
-    # Priority: custom_instructions > custom_prompt_file > default template
-    if custom_instructions:
-        logger.info("Using custom inline prompt")
-        return custom_instructions
+    # Step 1: Determine which template to use
+    # custom_prompt_file = full replacement, otherwise use base template
+    if custom_prompt_file:
+        template_file = custom_prompt_file
+        logger.info(f"Using custom prompt file: {template_file}")
+    else:
+        template_file = TEMPLATES_DIR / "default_review.md"
+        logger.info("Using default template")
 
-    # Determine which template to use
-    template_file = custom_prompt_file if custom_prompt_file else TEMPLATES_DIR / "default_review.md"
-
-    logger.info(f"Loading prompt from template: {template_file}")
+    # Step 2: Load template
+    logger.info(f"Loading template from: {template_file}")
     try:
         with open(template_file, "r", encoding="utf-8") as f:
             template_text = f.read()
@@ -101,7 +103,7 @@ def build_pr_review_prompt(
             f"Template file is required for code review."
         )
 
-    # Interpolate template variables
+    # Step 3: Interpolate template variables
     try:
         prompt = template_text.format(
             pr_url=pr_url,
@@ -111,12 +113,15 @@ def build_pr_review_prompt(
             diff_explanation=diff_explanation,
         )
         logger.info("Successfully interpolated template")
-        return prompt
     except KeyError as e:
         raise RuntimeError(
             f"Template interpolation failed - missing variable: {e}. "
             f"Template file: {template_file}"
         ) from e
 
-    # OLD BUILT-IN FALLBACK REMOVED - Template is now required
-    # This eliminates duplication and makes templates the single source of truth
+    # Step 4: Append custom_instructions if provided
+    if custom_instructions:
+        prompt += f"\n\n## Additional Instructions\n\n{custom_instructions}\n"
+        logger.info("Appended custom instructions to prompt")
+
+    return prompt
