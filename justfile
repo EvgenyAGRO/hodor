@@ -49,6 +49,10 @@ build:
 docker-build:
     docker buildx build --load -t hodor:local .
 
+# Build Docker image (no cache)
+docker-build-clean:
+    docker buildx build --no-cache --load -t hodor:local .
+
 # Run with Docker
 docker-run URL:
     docker run --rm \

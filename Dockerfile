@@ -31,27 +31,26 @@ RUN uv sync --no-dev --frozen --no-editable
 # Final stage
 FROM python:3.13-slim
 
-# Install system dependencies: git, gh CLI, glab CLI, and curl
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         git \
         curl \
-        ca-certificates \
-        gnupg \
-        wget && \
-    # Install GitHub CLI (gh)
-    mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gh && \
-    # Install GitLab CLI (glab)
-    curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.77.0/downloads/glab_1.77.0_linux_amd64.deb" -o /tmp/glab.deb && \
-    dpkg -i /tmp/glab.deb && \
-    rm /tmp/glab.deb && \
-    # Clean up
+        ca-certificates && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI (gh) - direct download from releases
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v2.83.0/gh_2.83.0_linux_amd64.tar.gz" -o /tmp/gh.tar.gz && \
+    tar -xzf /tmp/gh.tar.gz -C /tmp && \
+    mv /tmp/gh_2.83.0_linux_amd64/bin/gh /usr/local/bin/ && \
+    rm -rf /tmp/gh*
+
+# Install GitLab CLI (glab) - direct download from releases
+RUN curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.77.0/downloads/glab_1.77.0_linux_amd64.tar.gz" -o /tmp/glab.tar.gz && \
+    tar -xzf /tmp/glab.tar.gz -C /tmp && \
+    mv /tmp/bin/glab /usr/local/bin/ && \
+    rm -rf /tmp/glab* /tmp/bin
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
