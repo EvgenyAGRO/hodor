@@ -1,78 +1,163 @@
-# GitLab CI configuration for Hodor code review
+# Hodor AI Code Review for GitLab CI
 #
-# This pipeline automatically reviews merge requests and posts the review as a comment.
+# Automatically reviews merge requests and posts comments using AI-powered analysis.
+# Hodor uses 'glab' (GitLab CLI) internally for API operations.
 #
-# Required CI/CD Variables (Settings → CI/CD → Variables):
-# - ANTHROPIC_API_KEY or OPENAI_API_KEY: Your LLM API key
-# - GITLAB_TOKEN: GitLab personal access token with 'api' or 'read_api' scope
+# 📋 Setup Instructions:
+# 1. Set required CI/CD variables (Settings → CI/CD → Variables):
+#    - LLM_API_KEY (or ANTHROPIC_API_KEY/OPENAI_API_KEY): Your LLM API key
+#    - GITLAB_TOKEN: Personal/Project access token with 'api' scope
 #
-# Optional Variables:
-# - HODOR_MODEL: LLM model to use (default: gpt-5)
+# 2. (Optional) Set these variables for customization:
+#    - HODOR_MODEL: Model to use (default: anthropic/claude-sonnet-4-5)
+#    - HODOR_VERBOSE: Set to "true" for detailed logs
+#
+# 🔐 Token Authentication Options:
+#
+# Option A: Personal/Project Access Token (DEFAULT - see hodor-review job below)
+#   - Create at: Settings → Access Tokens
+#   - Required scope: 'api' or 'read_api' + 'write_repository'
+#   - Store as: GITLAB_TOKEN in CI/CD variables
+#   - ✅ Works with ALL GitLab API endpoints
+#   - ✅ Reliable for posting comments
+#
+# Option B: CI Job Token (ALTERNATIVE - see hodor-review-job-token below)
+#   - Automatically available as $CI_JOB_TOKEN (no manual setup)
+#   - ✅ More secure (auto-rotating, job-scoped)
+#   - ✅ No need to store tokens in CI/CD variables
+#   - ⚠️ LIMITED: Only certain API endpoints support job tokens
+#   - ⚠️ May not support all comment posting operations
+#   - 📚 See: https://docs.gitlab.com/ee/ci/jobs/ci_job_token.html
+#   - 💡 To use: Comment out 'hodor-review', uncomment 'hodor-review-job-token'
+#
+# 📚 Full Documentation: https://github.com/mr-karan/hodor/blob/main/docs/AUTOMATED_REVIEWS.md
 
-stages:
-  - review
-
-# Recommended: Using Docker image (faster, smaller)
-hodor-review:
-  stage: review
-  image:
-    name: ghcr.io/mr-karan/hodor:latest
-    entrypoint: [""]  # Override ENTRYPOINT to allow shell commands
-
-  # Only run on merge request events
+workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
+# ============================================================================
+# Option A: Review with Personal/Project Access Token (RECOMMENDED)
+# ============================================================================
+hodor-review:
+  stage: test
+  image:
+    name: ghcr.io/mr-karan/hodor:latest
+    entrypoint: [""]  # Override to allow shell commands
+
+  variables:
+    HODOR_MODEL: "anthropic/claude-sonnet-4-5"
+    HODOR_VERBOSE: "false"
+
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+  before_script:
+    # Authenticate glab with the personal/project access token
+    # This allows Hodor to use glab for all GitLab API operations
+    - glab auth login --hostname $CI_SERVER_HOST --token $GITLAB_TOKEN
+
   script:
-    # Construct the MR URL from GitLab CI variables
+    # Construct MR URL from GitLab CI variables
     - MR_URL="${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}"
-    - echo "Reviewing merge request: $MR_URL"
+    - echo "🔍 Reviewing MR: $MR_URL"
 
-    # Set model from environment variable or use default
-    - MODEL="${HODOR_MODEL:-gpt-5}"
-
-    # Run hodor review with --post-comment flag
+    # Run Hodor review (uses authenticated glab session)
     - |
-      hodor "$MR_URL" \
-        --model "$MODEL" \
-        --token "$GITLAB_TOKEN" \
-        --post-comment \
-        -v
+      if [ "$HODOR_VERBOSE" = "true" ]; then
+        hodor "$MR_URL" --model "$HODOR_MODEL" --post --verbose
+      else
+        hodor "$MR_URL" --model "$HODOR_MODEL" --post
+      fi
 
-  # Allow failure so MR isn't blocked if review fails
   allow_failure: true
-
-  # Timeout after 15 minutes
   timeout: 15m
 
-# Alternative: Build from source (use if Docker image not available yet)
-# Uncomment this and comment out the above job to build from source
+# ============================================================================
+# Option B: Review with CI Job Token (EXPERIMENTAL - NO TOKEN STORAGE)
+# ============================================================================
+# Uncomment this job and comment out 'hodor-review' above to use CI_JOB_TOKEN.
 #
-# hodor-review:
-#   stage: review
-#   image: python:3.11-slim
+# Benefits:
+# - No need to create or store tokens
+# - Automatically rotated and scoped to the job
+# - Better security (no long-lived credentials)
+#
+# Limitations:
+# - Limited API endpoint support
+# - May not work with all GitLab operations
+# - Test thoroughly before production use
+#
+# hodor-review-job-token:
+#   stage: test
+#   image:
+#     name: ghcr.io/mr-karan/hodor:latest
+#     entrypoint: [""]
+#
+#   variables:
+#     HODOR_MODEL: "anthropic/claude-sonnet-4-5"
+#     HODOR_VERBOSE: "false"
 #
 #   rules:
 #     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 #
 #   before_script:
-#     - pip install uv
-#     - git clone https://github.com/mr-karan/hodor.git
-#     - cd hodor
-#     - uv venv
-#     - uv pip install -e .
-#     - cd ..
+#     # Authenticate glab with the CI job token
+#     # This uses the automatically provided $CI_JOB_TOKEN
+#     - glab auth login --hostname $CI_SERVER_HOST --job-token $CI_JOB_TOKEN
 #
 #   script:
 #     - MR_URL="${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}"
-#     - MODEL="${HODOR_MODEL:-gpt-5}"
+#     - echo "🔍 Reviewing MR: $MR_URL"
+#
+#     # Run Hodor review (uses authenticated glab session)
 #     - |
-#       cd hodor
-#       uv run hodor "$MR_URL" \
-#         --model "$MODEL" \
-#         --token "$GITLAB_TOKEN" \
-#         --post-comment \
-#         -v
+#       if [ "$HODOR_VERBOSE" = "true" ]; then
+#         hodor "$MR_URL" --model "$HODOR_MODEL" --post --verbose
+#       else
+#         hodor "$MR_URL" --model "$HODOR_MODEL" --post
+#       fi
 #
 #   allow_failure: true
 #   timeout: 15m
+
+# ============================================================================
+# Optional Configurations
+# ============================================================================
+
+# Trigger review only when MR has specific label
+# hodor-review-on-label:
+#   extends: hodor-review
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_LABELS =~ /hodor-review/
+
+# Manual trigger for cost control
+# hodor-review-manual:
+#   extends: hodor-review
+#   when: manual
+
+# Different models for different target branches
+# hodor-review-main:
+#   extends: hodor-review
+#   variables:
+#     HODOR_MODEL: "anthropic/claude-opus-4"  # Most thorough
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"
+#
+# hodor-review-feature:
+#   extends: hodor-review
+#   variables:
+#     HODOR_MODEL: "anthropic/claude-sonnet-4-5"  # Balanced
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME != "main"
+
+# Only review specific file types
+# hodor-review-code-only:
+#   extends: hodor-review
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+#       changes:
+#         - "**/*.py"
+#         - "**/*.js"
+#         - "**/*.go"
+#         - "**/*.rs"
