@@ -91,10 +91,21 @@ def normalize_github_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _github_comments_to_notes(comments: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _github_comments_to_notes(
+    comments: dict[str, Any] | list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     if not comments:
         return []
-    nodes = comments.get("nodes") or []
+
+    if isinstance(comments, list):
+        nodes = comments
+    elif isinstance(comments, dict):
+        nodes = comments.get("nodes") or comments.get("edges") or []
+        # Handle GraphQL edge format
+        if nodes and isinstance(nodes[0], dict) and "node" in nodes[0]:
+            nodes = [edge.get("node", {}) for edge in nodes]
+    else:
+        nodes = []
     notes: list[dict[str, Any]] = []
     for node in nodes:
         notes.append(
