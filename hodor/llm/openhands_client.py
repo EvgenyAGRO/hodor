@@ -7,14 +7,144 @@ This module provides a clean interface to OpenHands SDK, handling:
 - Model name normalization
 """
 
+from dataclasses import dataclass
 import logging
 import os
+import shutil
 from typing import Any
 
 from openhands.sdk import LLM
 from openhands.tools.preset.default import get_default_agent
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelMetadata:
+    """Describes the normalized model string plus its capabilities."""
+
+    raw: str
+    normalized: str
+    supports_reasoning: bool
+    default_reasoning_effort: str
+
+
+@dataclass(frozen=True)
+class ModelRule:
+    """Rules that customize parsing for specific model families."""
+
+    identifiers: tuple[str, ...]
+    provider: str | None = None
+    use_responses_endpoint: bool | None = None
+    supports_reasoning: bool = False
+    default_reasoning_effort: str = "none"
+
+    def matches(self, model: str) -> bool:
+        model_lower = model.lower()
+        return any(identifier in model_lower for identifier in self.identifiers)
+
+
+# Ordered from most specific → least specific so substring matches work reliably.
+MODEL_RULES: tuple[ModelRule, ...] = (
+    # Mini reasoning models should stick to the standard completion endpoint.
+    ModelRule(
+        identifiers=("gpt-5-mini",),
+        provider="openai",
+        use_responses_endpoint=False,
+        supports_reasoning=True,
+        default_reasoning_effort="medium",
+    ),
+    ModelRule(
+        identifiers=("o3-mini",),
+        provider="openai",
+        use_responses_endpoint=False,
+        supports_reasoning=True,
+        default_reasoning_effort="medium",
+    ),
+    # Full GPT-5 models opt into the responses endpoint automatically.
+    ModelRule(
+        identifiers=("gpt-5",),
+        provider="openai",
+        use_responses_endpoint=True,
+        supports_reasoning=True,
+        default_reasoning_effort="medium",
+    ),
+    # Other OpenAI reasoning families.
+    ModelRule(
+        identifiers=("o3",),
+        provider="openai",
+        use_responses_endpoint=False,
+        supports_reasoning=True,
+        default_reasoning_effort="medium",
+    ),
+    ModelRule(
+        identifiers=("o1",),
+        provider="openai",
+        use_responses_endpoint=False,
+        supports_reasoning=True,
+        default_reasoning_effort="medium",
+    ),
+)
+
+
+def describe_model(model: str) -> ModelMetadata:
+    """Return normalized model name plus capability flags."""
+
+    cleaned_model = model.strip()
+    if not cleaned_model:
+        raise ValueError("Model name must be provided")
+
+    rule = _match_model_rule(cleaned_model)
+    normalized = _normalize_model_path(cleaned_model, rule)
+    supports_reasoning = rule.supports_reasoning if rule else False
+    default_reasoning_effort = rule.default_reasoning_effort if rule else "none"
+
+    return ModelMetadata(
+        raw=cleaned_model,
+        normalized=normalized,
+        supports_reasoning=supports_reasoning,
+        default_reasoning_effort=default_reasoning_effort,
+    )
+
+
+def _match_model_rule(model: str) -> ModelRule | None:
+    for rule in MODEL_RULES:
+        if rule.matches(model):
+            return rule
+    return None
+
+
+def _normalize_model_path(model: str, rule: ModelRule | None) -> str:
+    segments = [segment for segment in model.split("/") if segment]
+
+    if rule and rule.provider:
+        segments = _ensure_provider_segment(segments, rule.provider)
+
+    if rule and rule.use_responses_endpoint is not None:
+        segments = _ensure_responses_segment(segments, rule.use_responses_endpoint)
+
+    return "/".join(segments)
+
+
+def _ensure_provider_segment(segments: list[str], provider: str) -> list[str]:
+    normalized = list(segments)
+    if not normalized:
+        return [provider]
+    if normalized[0].lower() == provider.lower():
+        normalized[0] = provider
+        return normalized
+    return [provider, *normalized]
+
+
+def _ensure_responses_segment(segments: list[str], use_responses: bool) -> list[str]:
+    normalized = list(segments)
+    has_responses_segment = len(normalized) > 1 and normalized[1].lower() == "responses"
+    if use_responses and not has_responses_segment:
+        insert_index = 1 if normalized else 0
+        normalized.insert(insert_index, "responses")
+    elif not use_responses and has_responses_segment:
+        normalized.pop(1)
+    return normalized
 
 
 def get_api_key() -> str:
@@ -37,53 +167,6 @@ def get_api_key() -> str:
         raise RuntimeError("No LLM API key found. Please set one of: LLM_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY")
 
     return api_key
-
-
-def normalize_model_name(model: str) -> str:
-    """Normalize model names for consistency.
-
-    Handles special cases:
-    - gpt-5/o3-mini: Add OpenAI responses prefix
-    - Preserves provider prefixes (anthropic/, openai/, etc.)
-
-    Args:
-        model: Raw model name from user
-
-    Returns:
-        Normalized model name
-    """
-    model_lower = model.lower()
-
-    # Handle GPT-5 and o3-mini special cases (reasoning models)
-    if "gpt-5" in model_lower or "o3-mini" in model_lower:
-        # These are reasoning models that need the responses endpoint
-        if not model.startswith("openai/"):
-            return f"openai/responses/{model}"
-
-    return model
-
-
-def supports_reasoning(model: str) -> bool:
-    """Check if a model supports reasoning/thinking mode.
-
-    Args:
-        model: Model name
-
-    Returns:
-        True if model supports extended thinking
-    """
-    model_lower = model.lower()
-
-    # OpenAI reasoning models that use thinking by default
-    if "gpt-5" in model_lower or "o3" in model_lower or "o1" in model_lower:
-        return True
-
-    # NOTE: Claude models (Sonnet, Opus) CAN use extended thinking, but only
-    # when explicitly requested via --reasoning-effort flag. They don't use
-    # thinking by default because it makes reviews extremely slow (10-15min).
-    # Removed Claude from auto-detection to avoid unintended extended thinking.
-
-    return False
 
 
 def create_hodor_agent(
@@ -115,8 +198,8 @@ def create_hodor_agent(
     if api_key is None:
         api_key = get_api_key()
 
-    # Normalize model name
-    normalized_model = normalize_model_name(model)
+    metadata = describe_model(model)
+    normalized_model = metadata.normalized
 
     # Build LLM config
     llm_config: dict[str, Any] = {
@@ -126,12 +209,18 @@ def create_hodor_agent(
         "drop_params": True,  # Drop unsupported API parameters automatically
     }
 
+    # Disable encrypted reasoning for all OpenAI reasoning models
+    # The "include" parameter is for encrypted reasoning, which causes issues
+    # with GPT-5-mini and other models that don't support it
+    if metadata.supports_reasoning:
+        llm_config["enable_encrypted_reasoning"] = False
+
     # Add base URL if provided
     if base_url:
         llm_config["base_url"] = base_url
 
     # Handle temperature
-    thinking_active = reasoning_effort is not None or supports_reasoning(normalized_model)
+    thinking_active = reasoning_effort is not None or metadata.supports_reasoning
 
     if temperature is not None:
         llm_config["temperature"] = temperature
@@ -147,10 +236,9 @@ def create_hodor_agent(
         # User explicitly requested extended thinking
         llm_config["reasoning_effort"] = reasoning_effort
     else:
-        # IMPORTANT: OpenHands SDK defaults to reasoning_effort="high"!
-        # We must explicitly set "none" to disable extended thinking.
-        # Without this, all models will use slow extended thinking mode.
-        llm_config["reasoning_effort"] = "none"
+        # Default to the capability-aware reasoning mode to keep behaviour predictable.
+        # Non-reasoning models explicitly set "none" because OpenHands defaults to "high".
+        llm_config["reasoning_effort"] = metadata.default_reasoning_effort
 
     # Apply any user overrides
     if llm_overrides:
@@ -182,10 +270,11 @@ def create_hodor_agent(
     from openhands.tools.task_tracker import TaskTrackerTool
     from openhands.tools.terminal import TerminalTool
 
-    # Set wider terminal dimensions for better output formatting in OpenHands
+    # Set terminal dimensions dynamically based on actual terminal size
     # These environment variables are inherited by the subprocess terminal
-    os.environ.setdefault("COLUMNS", "200")
-    os.environ.setdefault("LINES", "50")
+    term_size = shutil.get_terminal_size(fallback=(200, 50))
+    os.environ.setdefault("COLUMNS", str(term_size.columns))
+    os.environ.setdefault("LINES", str(term_size.lines))
 
     tools = [
         Tool(name=TerminalTool.name, params={"terminal_type": "subprocess"}),  # Bash commands
