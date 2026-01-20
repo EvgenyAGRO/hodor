@@ -8,6 +8,7 @@ Hodor performs automated, in-depth code reviews by running as a stateful agent w
 
 **Features:**
 - **Cross-platform**: Works with GitHub and GitLab (cloud and self-hosted).
+- **GitLab Native**: Supports inline, resolvable discussions for GitLab Merge Requests.
 - **Sandboxed**: Each review runs in an isolated, temporary workspace.
 - **Context-aware**: Uses repository-specific "Skills" to enforce conventions.
 - **CI-Native**: Optimizes execution when running in GitHub Actions or GitLab CI.

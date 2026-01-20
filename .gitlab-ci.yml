@@ -44,8 +44,8 @@ workflow:
 hodor-review:
   stage: test
   image:
-    name: ghcr.io/mr-karan/hodor:latest
-    entrypoint: [""]  # Override to allow shell commands
+    name: registry.gitlab.com/coronet/bugatti/docker-registry/hodor-review:release-alpha
+    entrypoint: [""]
 
   variables:
     HODOR_MODEL: "anthropic/claude-sonnet-4-5-20250929"
@@ -67,9 +67,9 @@ hodor-review:
     # Run Hodor review (uses authenticated glab session)
     - |
       if [ "$HODOR_VERBOSE" = "true" ]; then
-        hodor "$MR_URL" --model "$HODOR_MODEL" --post --verbose
+        hodor "$MR_URL" --model "$HODOR_MODEL" --post --json --verbose
       else
-        hodor "$MR_URL" --model "$HODOR_MODEL" --post
+        hodor "$MR_URL" --model "$HODOR_MODEL" --post --json
       fi
 
   allow_failure: true

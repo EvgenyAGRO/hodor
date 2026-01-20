@@ -32,32 +32,36 @@ RUN uv sync --no-dev --frozen --no-editable
 FROM python:3.13-slim
 
 # Install system dependencies and common tools for PR reviews
+# ripgrep is available in Debian Bookworm repos
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        git \
-        curl \
-        ca-certificates \
-        jq \
-        shellcheck \
-        tree \
-        vim \
-        less && \
+    git \
+    curl \
+    wget \
+    gnupg \
+    ca-certificates \
+    jq \
+    shellcheck \
+    tree \
+    vim \
+    less \
+    ripgrep && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install ripgrep for better OpenHands grep/glob performance
-RUN curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep_15.1.0-1_amd64.deb" -o /tmp/ripgrep.deb && \
-    dpkg -i /tmp/ripgrep.deb && \
-    rm /tmp/ripgrep.deb
+# Install GitHub CLI (gh) - via official apt repo for multi-arch support
+RUN mkdir -p -m 755 /etc/apt/keyrings && \
+    wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y gh && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install GitHub CLI (gh) - direct download from releases
-RUN curl -fsSL "https://github.com/cli/cli/releases/download/v2.83.0/gh_2.83.0_linux_amd64.tar.gz" -o /tmp/gh.tar.gz && \
-    tar -xzf /tmp/gh.tar.gz -C /tmp && \
-    mv /tmp/gh_2.83.0_linux_amd64/bin/gh /usr/local/bin/ && \
-    rm -rf /tmp/gh*
-
-# Install GitLab CLI (glab) - direct download from releases
-RUN curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.77.0/downloads/glab_1.77.0_linux_amd64.tar.gz" -o /tmp/glab.tar.gz && \
+# Install GitLab CLI (glab) - direct download with dynamic arch for robustness
+RUN ARCH=$(dpkg --print-architecture) && \
+    GLAB_VERSION="1.77.0" && \
+    curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/glab.tar.gz && \
     tar -xzf /tmp/glab.tar.gz -C /tmp && \
     mv /tmp/bin/glab /usr/local/bin/ && \
     rm -rf /tmp/glab* /tmp/bin
@@ -88,11 +92,11 @@ RUN useradd -m -u 1000 hodor && \
 
 # Add labels for metadata
 LABEL org.opencontainers.image.title="Hodor" \
-      org.opencontainers.image.description="AI-powered code review agent for GitHub and GitLab" \
-      org.opencontainers.image.url="https://github.com/mr-karan/hodor" \
-      org.opencontainers.image.source="https://github.com/mr-karan/hodor" \
-      org.opencontainers.image.vendor="Karan Sharma" \
-      org.opencontainers.image.licenses="MIT"
+    org.opencontainers.image.description="AI-powered code review agent for GitHub and GitLab" \
+    org.opencontainers.image.url="https://github.com/mr-karan/hodor" \
+    org.opencontainers.image.source="https://github.com/mr-karan/hodor" \
+    org.opencontainers.image.vendor="Karan Sharma" \
+    org.opencontainers.image.licenses="MIT"
 
 USER hodor
 

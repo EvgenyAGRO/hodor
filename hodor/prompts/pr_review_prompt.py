@@ -53,8 +53,12 @@ def build_pr_review_prompt(
         template_file = custom_prompt_file
         logger.info(f"Using custom prompt file: {template_file}")
     elif output_format == "json":
-        template_file = TEMPLATES_DIR / "json_review.md"
-        logger.info("Using JSON review template")
+        if platform == "gitlab":
+            template_file = TEMPLATES_DIR / "gitlab_review.md"
+            logger.info("Using GitLab JSON review template")
+        else:
+            template_file = TEMPLATES_DIR / "json_review.md"
+            logger.info("Using JSON review template")
     else:
         template_file = TEMPLATES_DIR / "default_review.md"
         logger.info("Using default markdown template")

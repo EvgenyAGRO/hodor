@@ -141,7 +141,13 @@ def post_review_comment(
             return {"success": True, "platform": "github", "pr_number": pr_number}
 
         elif platform == "gitlab":
-            # Use glab CLI to post comment
+            # Try to post inline discussions first (if structured data is available)
+            # The inline poster handles parsing and verification of JSON data
+            if _post_gitlab_inline_review(owner, repo, pr_number, review_text, host):
+                logger.info(f"Successfully posted inline review to GitLab MR !{pr_number} on {owner}/{repo}")
+                return {"success": True, "platform": "gitlab", "mr_number": pr_number}
+
+            # Fallback to single comment (legacy behavior or if parsing failed/no findings)
             post_gitlab_mr_comment(
                 owner,
                 repo,
@@ -149,7 +155,7 @@ def post_review_comment(
                 review_text_with_footer,
                 host=host,
             )
-            logger.info(f"Successfully posted review to GitLab MR !{pr_number} on {owner}/{repo}")
+            logger.info(f"Successfully posted review comment to GitLab MR !{pr_number} on {owner}/{repo}")
             return {"success": True, "platform": "gitlab", "mr_number": pr_number}
 
         else:
@@ -165,6 +171,95 @@ def post_review_comment(
     except Exception as e:
         logger.error(f"Error posting comment: {str(e)}")
         return {"success": False, "error": str(e)}
+
+
+def _post_gitlab_inline_review(
+    owner: str,
+    repo: str,
+    mr_number: int,
+    review_output: str,
+    host: str | None,
+) -> bool:
+    """Helper to post inline GitLab discussions from review output."""
+    from .gitlab import create_mr_discussion, get_latest_mr_diff_refs, post_gitlab_mr_discussion
+    from .review_parser import parse_review_output
+
+    # Parse the output
+    parsed = parse_review_output(review_output)
+    
+    logger.info(f"Parsed review output: {len(parsed.findings)} findings, explanation length: {len(parsed.overall_explanation or '')}")
+
+    # If no findings and no explanation, return False to trigger fallback
+    if not parsed.findings and not parsed.overall_explanation:
+        logger.warning("No findings or explanation parsed from model output.")
+        return False
+
+    if not parsed.findings and parsed.overall_explanation:
+        logger.warning("Findings list is empty. If the model produced JSON, parsing might have failed or fallen back to raw text.")
+        logger.warning(f"Raw output sample (first 500 chars): {review_output[:500]!r}")
+        if len(review_output) > 500:
+             logger.warning(f"...Raw output tail (last 500 chars): {review_output[-500:]!r}")
+
+    # Get diff refs once
+    diff_refs = None
+    try:
+        diff_refs = get_latest_mr_diff_refs(owner, repo, mr_number, host)
+    except Exception as e:
+        logger.warning(f"Failed to get diff refs: {e}")
+
+    posted_count = 0
+    errors = []
+
+    # Post findings as discussions
+    for finding in parsed.findings:
+        # Determine path and line
+        # Simplified schema puts path/line directly in finding matching parsed.code_location logic
+        # review_parser puts them in finding.code_location regardless of source schema
+        file_path = str(finding.code_location.absolute_file_path)
+        start_line = finding.code_location.line_range.start
+        
+        # Determine strict line (GitLab needs new_line or old_line)
+        # We default to new_line (side='new')
+        
+        body = f"**{finding.title}**\n\n{finding.body}"
+        if finding.priority is not None:
+             # Already in title usually? parser adds it.
+             pass
+
+        try:
+            create_mr_discussion(
+                owner,
+                repo,
+                mr_number,
+                body,
+                file_path=file_path,
+                line=start_line,
+                side="new", # Default to new
+                diff_refs=diff_refs,
+                host=host,
+            )
+            posted_count += 1
+        except Exception as e:
+            errors.append(str(e))
+            logger.error(f"Failed to post finding at {file_path}:{start_line}: {e}")
+
+    # If there's an overall explanation/verdict, post it as a general note
+    if parsed.overall_correctness or parsed.overall_explanation:
+        summary_body = ""
+        if parsed.overall_correctness:
+            status = "correct" if parsed.overall_correctness == "patch is correct" else "blocking issues"
+            summary_body += f"**Review Status**: {status}\n\n"
+        
+        if parsed.overall_explanation:
+            summary_body += parsed.overall_explanation
+            
+        if summary_body:
+             post_gitlab_mr_discussion(owner, repo, mr_number, summary_body, host=host)
+
+    if errors:
+        logger.warning(f"Encountered {len(errors)} errors while posting findings.")
+    
+    return True # We attempted structured posting
 
 
 def review_pr(

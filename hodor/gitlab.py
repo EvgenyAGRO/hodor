@@ -165,6 +165,32 @@ def post_gitlab_mr_comment(
     return note.attributes
 
 
+def post_gitlab_mr_discussion(
+    owner: str,
+    repo: str,
+    mr_number: str | int,
+    body: str,
+    *,
+    host: str | None = None,
+) -> dict[str, Any]:
+    """Post a top-level discussion (resolvable thread) on a GitLab merge request."""
+
+    client = _create_gitlab_client(host)
+    project = _get_project(client, owner, repo)
+    mr = _get_merge_request(project, mr_number)
+
+    try:
+        discussion = mr.discussions.create({"body": body})
+    except gitlab_exceptions.GitlabAuthenticationError as exc:
+        raise GitLabAPIError("GitLab authentication failed when posting the review discussion.") from exc
+    except gitlab_exceptions.GitlabCreateError as exc:
+        raise GitLabAPIError(f"GitLab rejected the review discussion: {exc.error_message or exc}") from exc
+    except gitlab_exceptions.GitlabError as exc:  # pragma: no cover - defensive
+        raise GitLabAPIError(f"Failed to post discussion to merge request !{mr_number}: {exc}") from exc
+
+    return discussion.attributes
+
+
 def summarize_gitlab_notes(
     notes: list[dict[str, Any]] | None,
     *,
@@ -242,3 +268,118 @@ def summarize_gitlab_notes(
         lines.append(f"{header}\n  {indented_body}")
 
     return "\n".join(lines)
+
+
+def get_latest_mr_diff_refs(
+    owner: str,
+    repo: str,
+    mr_number: str | int,
+    host: str | None = None,
+) -> dict[str, str]:
+    """
+    Fetch the latest diff references (base_sha, start_sha, head_sha) for an MR.
+
+    These are required for creating inline discussions on the correct diff version.
+    """
+    client = _create_gitlab_client(host)
+    project = _get_project(client, owner, repo)
+    mr = _get_merge_request(project, mr_number)
+
+    # Get the latest version
+    try:
+        versions = mr.versions.list(order_by="id", sort="desc")
+    except (gitlab_exceptions.GitlabError, AttributeError) as exc:
+        logger.warning(f"Failed to fetch MR versions for !{mr_number}: {exc}")
+        versions = []
+
+    if not versions:
+        # Fallback if no versions found (fresh MR?), use MR attributes
+        # usage of simple attributes might fail "position" validation if rebased
+        logger.warning(f"No versions found for MR !{mr_number}, falling back to current SHA/target.")
+        return {
+            "base_sha": mr.diff_refs.get("base_sha"),
+            "start_sha": mr.diff_refs.get("start_sha"),
+            "head_sha": mr.diff_refs.get("head_sha"),
+        }
+
+    latest = versions[0]
+    # versions[0] is a RESTObject, attributes are available directly
+    return {
+        "base_sha": latest.base_commit_sha,
+        "start_sha": latest.start_commit_sha,
+        "head_sha": latest.head_commit_sha,
+    }
+
+
+def create_mr_discussion(
+    owner: str,
+    repo: str,
+    mr_number: str | int,
+    body: str,
+    file_path: str,
+    line: int,
+    side: str = "new",
+    diff_refs: dict[str, str] | None = None,
+    host: str | None = None,
+) -> dict[str, Any]:
+    """
+    Create a new discussion on a GitLab MR, inline if possible.
+
+    Args:
+        owner: Project namespace
+        repo: Project name
+        mr_number: MR IID
+        body: Comment text
+        file_path: Relative path to the file
+        line: Line number (new line for side="new")
+        side: "new" (added/changed) or "old" (removed)
+        diff_refs: Dict with base_sha, start_sha, head_sha (optional, fetched if missing)
+        host: GitLab host instance
+    """
+    client = _create_gitlab_client(host)
+    project = _get_project(client, owner, repo)
+    mr = _get_merge_request(project, mr_number)
+
+    # If diff_refs not provided, fetch them (optimized to pass them in loop)
+    if not diff_refs:
+        try:
+            diff_refs = get_latest_mr_diff_refs(owner, repo, mr_number, host)
+        except Exception as e:
+            logger.warning(f"Could not fetch diff refs: {e}. Falling back to non-inline comment.")
+            diff_refs = None
+
+    # Try to post inline discussion
+    if diff_refs and file_path and line:
+        position = {
+            "position_type": "text",
+            "base_sha": diff_refs.get("base_sha"),
+            "start_sha": diff_refs.get("start_sha"),
+            "head_sha": diff_refs.get("head_sha"),
+            "new_path": file_path,
+            "old_path": file_path,  # Assumption: no rename or same path. Logic for rename is complex without full diff.
+        }
+
+        if side == "new":
+            position["new_line"] = line
+        else:
+            position["old_line"] = line
+
+        try:
+            discussion = mr.discussions.create({"body": body, "position": position})
+            return discussion.attributes
+        except (gitlab_exceptions.GitlabCreateError, gitlab_exceptions.GitlabError) as exc:
+            logger.warning(
+                f"Failed to post inline discussion at {file_path}:{line}. "
+                f"Error: {exc.error_message or exc}. "
+                f"Falling back to general note."
+            )
+            # Proceed to fallback below
+
+    # Fallback: General discussion (non-inline)
+    # Prefix body with location to keep context
+    fallback_body = f"**[{file_path}:{line}]**\n\n{body}\n\n*(Inline comment failed to post)*"
+    try:
+        discussion = mr.discussions.create({"body": fallback_body})
+        return discussion.attributes
+    except gitlab_exceptions.GitlabError as exc:
+        raise GitLabAPIError(f"Failed to post discussion fallback for !{mr_number}: {exc}") from exc

@@ -64,6 +64,22 @@ class ReviewFinding:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReviewFinding":
+        # Handle simplified schema (GitLab inline)
+        if "path" in data and "line" in data:
+            file_path = data["path"]
+            line = data["line"]
+            return cls(
+                title=data.get("title", "Review Finding"),  # Default title if missing
+                body=data["body"],
+                confidence_score=data.get("confidence_score", 1.0),  # Default confidence
+                code_location=ReviewCodeLocation(
+                    absolute_file_path=Path(file_path),  # Will be relative path usually
+                    line_range=ReviewLineRange(start=line, end=line),
+                ),
+                priority=data.get("priority"),
+            )
+
+        # Handle standard schema
         return cls(
             title=data["title"],
             body=data["body"],
@@ -95,10 +111,15 @@ class ReviewOutputEvent:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReviewOutputEvent":
+        # Handle "summary" field from simplified schema
+        overall_explanation = data.get("overall_explanation", "")
+        if not overall_explanation and "summary" in data:
+            overall_explanation = data["summary"]
+
         return cls(
             findings=[ReviewFinding.from_dict(f) for f in data.get("findings", [])],
             overall_correctness=data.get("overall_correctness", ""),
-            overall_explanation=data.get("overall_explanation", ""),
+            overall_explanation=overall_explanation,
             overall_confidence_score=data.get("overall_confidence_score", 0.0),
         )
 
@@ -131,6 +152,17 @@ def parse_review_output(text: str) -> ReviewOutputEvent:
         return ReviewOutputEvent.from_dict(data)
     except json.JSONDecodeError:
         pass
+
+    # Tier 1.5: Extract from markdown code blocks (```json ... ```)
+    # This captures cases where the LLM fences the JSON
+    code_block_pattern = r"```(?:json)?\s*(\{.*?\})\s*```"
+    match = re.search(code_block_pattern, text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            return ReviewOutputEvent.from_dict(data)
+        except json.JSONDecodeError:
+            pass
 
     # Tier 2: Extract {...} block and parse that
     # Find the outermost JSON object

@@ -256,8 +256,12 @@ def main(
                 if output_json:
                     from .review_parser import parse_review_output, format_review_markdown
 
-                    parsed = parse_review_output(review_output)
-                    review_text = format_review_markdown(parsed)
+                    # For GitLab, we want to try inline comments, so pass raw JSON
+                    if platform == "gitlab":
+                        review_text = review_output
+                    else:
+                        parsed = parse_review_output(review_output)
+                        review_text = format_review_markdown(parsed)
                 else:
                     review_text = review_output
 
