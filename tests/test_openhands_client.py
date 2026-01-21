@@ -72,3 +72,28 @@ def test_get_api_key_fallback_order_without_model(monkeypatch):
 def test_get_api_key_raises_when_missing(monkeypatch):
     with pytest.raises(RuntimeError):
         get_api_key("openai/gpt-4o")
+
+
+class _DummyLLM:
+    def __init__(self, enable_encrypted_reasoning: bool):
+        self.max_output_tokens = None
+        self.extra_headers = None
+        self.reasoning_effort = None
+        self.reasoning_summary = None
+        self.model = "openai/gpt-5"
+        self.litellm_extra_body = None
+        self.enable_encrypted_reasoning = enable_encrypted_reasoning
+
+
+def test_responses_options_respects_encrypted_flag():
+    responses_options = pytest.importorskip("openhands.sdk.llm.options.responses_options")
+
+    opts_enabled = responses_options.select_responses_options(
+        _DummyLLM(True), {}, include=None, store=None
+    )
+    assert "reasoning.encrypted_content" in opts_enabled.get("include", [])
+
+    opts_disabled = responses_options.select_responses_options(
+        _DummyLLM(False), {}, include=None, store=None
+    )
+    assert "reasoning.encrypted_content" not in opts_disabled.get("include", [])
