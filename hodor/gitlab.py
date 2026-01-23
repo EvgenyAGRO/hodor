@@ -191,6 +191,30 @@ def post_gitlab_mr_discussion(
     return discussion.attributes
 
 
+def get_merge_request_discussions(
+    owner: str,
+    repo: str,
+    mr_number: str | int,
+    *,
+    host: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch all discussions for a merge request."""
+
+    client = _create_gitlab_client(host)
+    project = _get_project(client, owner, repo)
+    mr = _get_merge_request(project, mr_number)
+
+    try:
+        # Fetch all discussions with pagination
+        discussions = mr.discussions.list(all=True, per_page=100)
+    except gitlab_exceptions.GitlabAuthenticationError as exc:
+        raise GitLabAPIError("GitLab authentication failed while fetching discussions.") from exc
+    except gitlab_exceptions.GitlabGetError as exc:
+        raise GitLabAPIError(f"Failed to fetch discussions for MR !{mr_number}: {exc.error_message or exc}") from exc
+
+    return [d.attributes for d in discussions]
+
+
 def summarize_gitlab_notes(
     notes: list[dict[str, Any]] | None,
     *,
@@ -279,36 +303,39 @@ def get_latest_mr_diff_refs(
     """
     Fetch the latest diff references (base_sha, start_sha, head_sha) for an MR.
 
-    These are required for creating inline discussions on the correct diff version.
+    Strategy:
+    1. Check 'diff_refs' attribute (Zero API calls).
+    2. Reliable fallback: call REST endpoint directly (1 API call).
     """
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)
     mr = _get_merge_request(project, mr_number)
 
-    # Get the latest version
-    try:
-        versions = mr.versions.list(order_by="id", sort="desc")
-    except (gitlab_exceptions.GitlabError, AttributeError) as exc:
-        logger.warning(f"Failed to fetch MR versions for !{mr_number}: {exc}")
-        versions = []
-
-    if not versions:
-        # Fallback if no versions found (fresh MR?), use MR attributes
-        # usage of simple attributes might fail "position" validation if rebased
-        logger.warning(f"No versions found for MR !{mr_number}, falling back to current SHA/target.")
+    # Priority 1: Check MR object directly (Fastest)
+    refs = getattr(mr, "diff_refs", None)
+    if isinstance(refs, dict) and refs.get("head_sha"):
         return {
-            "base_sha": mr.diff_refs.get("base_sha"),
-            "start_sha": mr.diff_refs.get("start_sha"),
-            "head_sha": mr.diff_refs.get("head_sha"),
+            "base_sha": refs["base_sha"],
+            "start_sha": refs["start_sha"],
+            "head_sha": refs["head_sha"],
         }
 
-    latest = versions[0]
-    # versions[0] is a RESTObject, attributes are available directly
-    return {
-        "base_sha": latest.base_commit_sha,
-        "start_sha": latest.start_commit_sha,
-        "head_sha": latest.head_commit_sha,
-    }
+    # Reliable Fallback: Call REST endpoint directly
+    # Latest diff version is listed first by GitLab
+    try:
+        versions = client.http_get(f"/projects/{project.id}/merge_requests/{mr.iid}/versions")
+        if versions:
+            latest = versions[0]
+            # Map API fields to our internal field names
+            return {
+                "base_sha": latest.get("base_commit_sha"),
+                "start_sha": latest.get("start_commit_sha"),
+                "head_sha": latest.get("head_commit_sha"),
+            }
+    except Exception as exc:
+        logger.warning(f"Failed to fetch MR versions via direct REST call: {exc}")
+
+    return {}
 
 
 def create_mr_discussion(

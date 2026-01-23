@@ -116,6 +116,14 @@ def build_pr_review_prompt(
     # Step 3: Interpolate template variables
     mr_context_section, mr_notes_section, mr_reminder_section = _build_mr_sections(mr_metadata)
 
+    # Step 3.5: Build Jira context if available
+    jira_context_section = ""
+    if mr_metadata:
+        from ..jira import build_jira_context
+        mr_title = mr_metadata.get("title", "")
+        mr_description = mr_metadata.get("description", "")
+        jira_context_section = build_jira_context(mr_title, mr_description)
+
     try:
         prompt = template_text.format(
             pr_url=pr_url,
@@ -126,6 +134,7 @@ def build_pr_review_prompt(
             mr_context_section=mr_context_section,
             mr_notes_section=mr_notes_section,
             mr_reminder_section=mr_reminder_section,
+            jira_context_section=jira_context_section,
         )
         logger.info("Successfully interpolated template")
     except KeyError as e:

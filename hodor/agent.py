@@ -7,17 +7,16 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from . import _tty as _terminal_safety  # noqa: F401
-
 from dotenv import load_dotenv
 from openhands.sdk import Conversation
 from openhands.sdk.conversation import get_agent_final_response
 from openhands.sdk.event import Event
 from openhands.sdk.workspace import LocalWorkspace
 
+from . import _tty as _terminal_safety  # noqa: F401
 from .github import GitHubAPIError, fetch_github_pr_info, normalize_github_metadata
 from .gitlab import GitLabAPIError, fetch_gitlab_mr_info, post_gitlab_mr_comment
-from .llm import create_hodor_agent, get_api_key
+from .llm import create_hodor_agent
 from .prompts.pr_review_prompt import build_pr_review_prompt
 from .skills import discover_skills
 from .workspace import cleanup_workspace, setup_workspace
@@ -89,9 +88,9 @@ def parse_pr_url(pr_url: str) -> tuple[str, str, int, str]:
 
 
 def post_review_comment(
-    pr_url: str,
-    review_text: str,
-    model: str | None = None,
+        pr_url: str,
+        review_text: str,
+        model: str | None = None,
 ) -> dict[str, Any]:
     """
     Post a review comment on a GitHub PR or GitLab MR using CLI tools.
@@ -174,20 +173,22 @@ def post_review_comment(
 
 
 def _post_gitlab_inline_review(
-    owner: str,
-    repo: str,
-    mr_number: int,
-    review_output: str,
-    host: str | None,
+        owner: str,
+        repo: str,
+        mr_number: int,
+        review_output: str,
+        host: str | None,
 ) -> bool:
     """Helper to post inline GitLab discussions from review output."""
-    from .gitlab import create_mr_discussion, get_latest_mr_diff_refs, post_gitlab_mr_discussion
+    from .gitlab import create_mr_discussion, get_latest_mr_diff_refs, post_gitlab_mr_discussion, \
+        get_merge_request_discussions, post_gitlab_mr_comment
     from .review_parser import parse_review_output
 
     # Parse the output
     parsed = parse_review_output(review_output)
-    
-    logger.info(f"Parsed review output: {len(parsed.findings)} findings, explanation length: {len(parsed.overall_explanation or '')}")
+
+    logger.info(
+        f"Parsed review output: {len(parsed.findings)} findings, explanation length: {len(parsed.overall_explanation or '')}")
 
     # If no findings and no explanation, return False to trigger fallback
     if not parsed.findings and not parsed.overall_explanation:
@@ -195,10 +196,11 @@ def _post_gitlab_inline_review(
         return False
 
     if not parsed.findings and parsed.overall_explanation:
-        logger.warning("Findings list is empty. If the model produced JSON, parsing might have failed or fallen back to raw text.")
+        logger.warning(
+            "Findings list is empty. If the model produced JSON, parsing might have failed or fallen back to raw text.")
         logger.warning(f"Raw output sample (first 500 chars): {review_output[:500]!r}")
         if len(review_output) > 500:
-             logger.warning(f"...Raw output tail (last 500 chars): {review_output[-500:]!r}")
+            logger.warning(f"...Raw output tail (last 500 chars): {review_output[-500:]!r}")
 
     # Get diff refs once
     diff_refs = None
@@ -207,24 +209,49 @@ def _post_gitlab_inline_review(
     except Exception as e:
         logger.warning(f"Failed to get diff refs: {e}")
 
+    # Fetch existing discussions for deduplication
+    existing_discussions = []
+    try:
+        existing_discussions = get_merge_request_discussions(owner, repo, mr_number, host=host)
+    except Exception as e:
+        logger.warning(f"Failed to fetch existing discussions for deduplication: {e}")
+
+    # Build a lookup of existing comments
+    # Key: (file_path, line_number, validation_key) -> True
+    # validation_key is a snippet of the title or body to identify the issue
+    existing_comments = set()
+    for discussion in existing_discussions:
+        for note in discussion.get("notes", []):
+            position = note.get("position") or {}
+            file_path = position.get("new_path")
+            line = position.get("new_line")
+            body = note.get("body", "")
+
+            if file_path and line:
+                existing_comments.add((file_path, line, body))
+
     posted_count = 0
     errors = []
 
     # Post findings as discussions
     for finding in parsed.findings:
-        # Determine path and line
-        # Simplified schema puts path/line directly in finding matching parsed.code_location logic
-        # review_parser puts them in finding.code_location regardless of source schema
         file_path = str(finding.code_location.absolute_file_path)
         start_line = finding.code_location.line_range.start
-        
-        # Determine strict line (GitLab needs new_line or old_line)
-        # We default to new_line (side='new')
-        
+        title = finding.title
+
+        # Check for duplicates using fuzzy matching on body/title
+        is_duplicate = False
+        for (ex_path, ex_line, ex_body) in existing_comments:
+            if ex_path == file_path and ex_line == start_line:
+                if title in ex_body:  # Simple check: if title is in the existing comment
+                    is_duplicate = True
+                    break
+
+        if is_duplicate:
+            logger.info(f"Skipping duplicate finding at {file_path}:{start_line} ('{title}')")
+            continue
+
         body = f"**{finding.title}**\n\n{finding.body}"
-        if finding.priority is not None:
-             # Already in title usually? parser adds it.
-             pass
 
         try:
             create_mr_discussion(
@@ -234,47 +261,51 @@ def _post_gitlab_inline_review(
                 body,
                 file_path=file_path,
                 line=start_line,
-                side="new", # Default to new
+                side="new",  # Default to new
                 diff_refs=diff_refs,
                 host=host,
             )
             posted_count += 1
+            # Add to local set to avoid duplicates within same run
+            existing_comments.add((file_path, start_line, body))
         except Exception as e:
             errors.append(str(e))
             logger.error(f"Failed to post finding at {file_path}:{start_line}: {e}")
 
-    # If there's an overall explanation/verdict, post it as a general note
+    # If there's an overall explanation/verdict
     if parsed.overall_correctness or parsed.overall_explanation:
         summary_body = ""
         if parsed.overall_correctness:
             status = "correct" if parsed.overall_correctness == "patch is correct" else "blocking issues"
             summary_body += f"**Review Status**: {status}\n\n"
-        
+
         if parsed.overall_explanation:
             summary_body += parsed.overall_explanation
-            
+
         if summary_body:
-             post_gitlab_mr_discussion(owner, repo, mr_number, summary_body, host=host)
+            # Always post summary as a top-level comment (not a thread) per user request
+            logger.info("Posting summary as a general comment.")
+            post_gitlab_mr_comment(owner, repo, mr_number, summary_body, host=host)
 
     if errors:
         logger.warning(f"Encountered {len(errors)} errors while posting findings.")
-    
-    return True # We attempted structured posting
+
+    return True  # We attempted structured posting
 
 
 def review_pr(
-    pr_url: str,
-    model: str = "anthropic/claude-sonnet-4-5-20250929",
-    temperature: float | None = None,
-    reasoning_effort: str | None = None,
-    custom_prompt: str | None = None,
-    prompt_file: Path | None = None,
-    user_llm_params: dict[str, Any] | None = None,
-    verbose: bool = False,
-    cleanup: bool = True,
-    workspace_dir: Path | None = None,
-    output_format: str = "markdown",
-    max_iterations: int = 500,
+        pr_url: str,
+        model: str = "anthropic/claude-sonnet-4-5-20250929",
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        custom_prompt: str | None = None,
+        prompt_file: Path | None = None,
+        user_llm_params: dict[str, Any] | None = None,
+        verbose: bool = False,
+        cleanup: bool = True,
+        workspace_dir: Path | None = None,
+        output_format: str = "markdown",
+        max_iterations: int = 500,
 ) -> str:
     """
     Review a pull request using OpenHands agent with bash tools.

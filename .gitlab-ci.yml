@@ -13,6 +13,8 @@
 #      Recommended: anthropic/claude-sonnet-4-20250514, anthropic/claude-sonnet-4-5-20250929,
 #                   openai/gpt-5-2025-08-07, gemini/gemini-2.5-pro, deepseek/deepseek-chat
 #    - HODOR_VERBOSE: Set to "true" for detailed logs
+#    - JIRA_EMAIL: Email for Jira API authentication (optional)
+#    - JIRA_API_KEY: Jira API token (optional, enables Jira context in reviews)
 #
 # 🔐 Token Authentication Options:
 #

@@ -12,6 +12,8 @@ Identify production bugs in the PR's diff only. You are in READ-ONLY mode - anal
 
 {mr_reminder_section}
 
+{jira_context_section}
+
 ## Step 1: List Changed Files (MANDATORY FIRST STEP)
 
 **Run this command FIRST to get the list of changed files:**
