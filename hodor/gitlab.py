@@ -237,7 +237,7 @@ def summarize_gitlab_notes(
 
     filtered = []
     for note in notes:
-        body = note.get("body", "").strip()
+        body = (note.get("body") or "").strip()
         if not body:
             continue
 

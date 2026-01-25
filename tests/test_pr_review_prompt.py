@@ -25,3 +25,15 @@ def test_build_mr_sections_prefers_label_details_when_available() -> None:
     context_section, _, _ = _build_mr_sections(metadata)
 
     assert "- Labels: frontend, regression" in context_section
+
+
+def test_build_mr_sections_handles_none_description() -> None:
+    metadata = {
+        "title": "Fix bug",
+        "description": None,
+    }
+
+    context_section, _, _ = _build_mr_sections(metadata)
+
+    assert "- Title: Fix bug" in context_section
+    assert "Author Description" not in context_section

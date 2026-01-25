@@ -189,7 +189,7 @@ def _build_mr_sections(mr_metadata: dict[str, Any] | None) -> tuple[str, str, st
     if label_names:
         context_lines.append(f"- Labels: {', '.join(label_names)}")
 
-    description = mr_metadata.get("description", "").strip()
+    description = (mr_metadata.get("description") or "").strip()
     description_section = ""
     if description:
         description_section = "**Author Description:**\n" + _truncate_block(description, 800)

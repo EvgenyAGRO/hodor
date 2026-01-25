@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from hodor.gitlab import get_latest_mr_diff_refs, create_mr_discussion, GitLabAPIError
+from hodor.gitlab import get_latest_mr_diff_refs, create_mr_discussion, GitLabAPIError, summarize_gitlab_notes
 from gitlab import exceptions as gitlab_exceptions
 
 @pytest.fixture
@@ -109,3 +109,15 @@ def test_create_mr_discussion_implicit_refs(mock_mr):
     mock_mr.discussions.create.assert_called_once()
     call_args = mock_mr.discussions.create.call_args[0][0]
     assert call_args["position"]["base_sha"] == "ib"
+
+def test_summarize_gitlab_notes_handles_none_body() -> None:
+    notes = [
+        {"author": {"username": "user1"}, "body": "valid comment that is definitely longer than twenty characters", "created_at": "2023-01-01T12:00:00Z"},
+        {"author": {"username": "user2"}, "body": None, "created_at": "2023-01-01T12:05:00Z"},
+    ]
+    
+    summary = summarize_gitlab_notes(notes)
+    
+    assert "user1" in summary
+    assert "valid comment" in summary
+    assert "user2" not in summary
