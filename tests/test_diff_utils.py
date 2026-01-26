@@ -1,8 +1,7 @@
-import pytest
+import importlib.util
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import importlib.util
 
 # Load diff_utils module directly (avoids package import issues with openhands)
 _module_path = Path(__file__).parent.parent / "hodor" / "diff_utils.py"
@@ -16,53 +15,58 @@ FileDiffStats = _diff_utils.FileDiffStats
 get_diff_stats = _diff_utils.get_diff_stats
 analyze_and_limit_diff = _diff_utils.analyze_and_limit_diff
 
+
 def test_trim_patch_preview():
     # Create a dummy patch with 300 lines
     lines = [f"line {i}" for i in range(300)]
     patch = "\n".join(lines)
-    
+
     trimmed, is_trimmed = trim_patch(patch, max_lines=150, action="preview")
-    
+
     assert is_trimmed is True
     assert "line 0" in trimmed
     assert "line 79" in trimmed
     assert "[TRIMMED DUE TO SIZE]" in trimmed
-    assert "line 100" not in trimmed # Middle part should be gone
-    assert "line 220" in trimmed # Should be in tail (last 80 lines: 220-299)
+    assert "line 100" not in trimmed  # Middle part should be gone
+    assert "line 220" in trimmed  # Should be in tail (last 80 lines: 220-299)
     assert "line 299" in trimmed
+
 
 def test_trim_patch_skip():
     patch = "some patch content"
     trimmed, is_trimmed = trim_patch(patch, max_lines=5, action="skip")
-    
+
     assert is_trimmed is True
     assert "[PATCH SKIPPED DUE TO SIZE LIMITS]" in trimmed
+
 
 def test_trim_patch_no_trim_if_small():
     patch = "line 1\nline 2"
     trimmed, is_trimmed = trim_patch(patch, max_lines=10, action="preview")
-    
+
     assert is_trimmed is False
     assert trimmed == patch
+
 
 @patch("subprocess.run")
 def test_get_diff_stats(mock_run):
     # Mock git diff --numstat
     mock_run.side_effect = [
-        MagicMock(stdout="10\t5\tfile1.py\n100\t0\tfile2.txt\n", returncode=0), # numstat
-        MagicMock(stdout="patch1", returncode=0), # size for file 1
-        MagicMock(stdout="patch2" * 10, returncode=0), # size for file 2
+        MagicMock(stdout="10\t5\tfile1.py\n100\t0\tfile2.txt\n", returncode=0),  # numstat
+        MagicMock(stdout="patch1", returncode=0),  # size for file 1
+        MagicMock(stdout="patch2" * 10, returncode=0),  # size for file 2
     ]
-    
+
     global get_diff_stats
     stats = get_diff_stats(Path("/tmp"), "base", "head")
-    
+
     assert len(stats) == 2
     assert stats[0].path == "file1.py"
     assert stats[0].added == 10
     assert stats[0].deleted == 5
     assert stats[1].path == "file2.txt"
-    assert stats[1].size_bytes == 60 # "patch2" is 6 bytes. 6 * 10 = 60.
+    assert stats[1].size_bytes == 60  # "patch2" is 6 bytes. 6 * 10 = 60.
+
 
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
@@ -86,6 +90,7 @@ def test_analyze_and_limit_diff(mock_run, mock_stats):
     assert results[1].is_trimmed is True
     assert "[TRIMMED DUE TO SIZE]" in results[1].patch
 
+
 # New comprehensive tests for robustness
 
 def test_trim_patch_sample_action():
@@ -93,9 +98,9 @@ def test_trim_patch_sample_action():
     # Create a patch with multiple hunks
     lines = []
     for i in range(10):
-        lines.append(f"@@ -{i*10},5 +{i*10},5 @@")
+        lines.append(f"@@ -{i * 10},5 +{i * 10},5 @@")
         for j in range(20):
-            lines.append(f"+line {i*100 + j}")
+            lines.append(f"+line {i * 100 + j}")
     patch = "\n".join(lines)
 
     trimmed, is_trimmed = trim_patch(patch, max_lines=50, action="sample")
@@ -103,6 +108,7 @@ def test_trim_patch_sample_action():
     assert is_trimmed is True
     assert "@@" in trimmed  # Should contain hunk headers
     assert "[SAMPLED" in trimmed.upper() or "[TRIMMED" in trimmed.upper()
+
 
 def test_trim_patch_summarize_action():
     """Test summarize action returns only stats, no content."""
@@ -117,6 +123,7 @@ def test_trim_patch_summarize_action():
     # Should NOT contain actual patch content
     assert "+line 500" not in trimmed
 
+
 def test_trim_patch_empty_diff():
     """Test handling of empty diffs."""
     patch = ""
@@ -125,6 +132,7 @@ def test_trim_patch_empty_diff():
 
     assert is_trimmed is False
     assert trimmed == ""
+
 
 def test_trim_patch_exactly_at_limit():
     """Test diff exactly at line limit is not trimmed."""
@@ -137,6 +145,7 @@ def test_trim_patch_exactly_at_limit():
     assert is_trimmed is False
     assert trimmed == patch
 
+
 def test_trim_patch_single_line():
     """Test single-line changes are not trimmed."""
     patch = "+single line change"
@@ -145,6 +154,7 @@ def test_trim_patch_single_line():
 
     assert is_trimmed is False
     assert trimmed == patch
+
 
 @patch("subprocess.run")
 def test_get_diff_stats_with_byte_sizes(mock_run):
@@ -163,6 +173,7 @@ def test_get_diff_stats_with_byte_sizes(mock_run):
     assert stats[0].added == 50
     assert stats[0].deleted == 20
     assert stats[0].size_bytes == 250000
+
 
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
@@ -193,6 +204,7 @@ def test_analyze_and_limit_diff_byte_limit(mock_run, mock_stats):
     assert results[1].is_large is True  # Exceeds byte limit
     assert results[1].is_trimmed is True
 
+
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_line_limit(mock_run, mock_stats):
@@ -216,6 +228,7 @@ def test_analyze_and_limit_diff_line_limit(mock_run, mock_stats):
     assert results[0].is_large is True  # Exceeds line limit
     assert results[0].is_trimmed is True
 
+
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_skip_action(mock_run, mock_stats):
@@ -236,6 +249,7 @@ def test_analyze_and_limit_diff_skip_action(mock_run, mock_stats):
     assert results[0].is_large is True
     assert results[0].is_trimmed is True
     assert "[PATCH SKIPPED" in results[0].patch
+
 
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
@@ -262,6 +276,7 @@ def test_analyze_and_limit_diff_binary_file(mock_run, mock_stats):
     assert results[0].is_large is True  # Exceeds byte limit
     assert "Binary files" in results[0].patch or "[TRIMMED" in results[0].patch
 
+
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_error_fetching_patch(mock_run, mock_stats):
@@ -278,6 +293,7 @@ def test_analyze_and_limit_diff_error_fetching_patch(mock_run, mock_stats):
 
     assert len(results) == 1
     assert "[ERROR" in results[0].patch  # Should contain error marker
+
 
 @patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
