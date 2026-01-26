@@ -48,12 +48,14 @@ class TestGitLabReview(unittest.TestCase):
     @patch("hodor.agent.post_gitlab_mr_discussion")
     @patch("hodor.agent.post_gitlab_mr_comment")
     @patch("hodor.agent.parse_review_output")
-    def test_duplicate_check(self, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
+    @patch("hodor.agent.parse_existing_comments")
+    @patch("hodor.agent.is_duplicate_finding")
+    def test_duplicate_check(self, mock_is_dup, mock_parse_existing, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that duplicate comments are skipped."""
-        
+
         # Setup mocks
         mock_get_refs.return_value = {"base_sha": "a", "start_sha": "b", "head_sha": "c"}
-        
+
         # Existing discussion at file.py:10 with "Fix this"
         mock_get_discussions.return_value = [{
             "notes": [{
@@ -61,25 +63,34 @@ class TestGitLabReview(unittest.TestCase):
                 "body": "**[P1] Fix this**\n\nSome body"
             }]
         }]
-        
+
+        # Mock parse_existing_comments to return normalized format
+        mock_parse_existing.return_value = [
+            {"path": "file.py", "line": 10, "body": "**[P1] Fix this**\n\nSome body"}
+        ]
+
+        # Mock is_duplicate_finding to return True (finding is a duplicate)
+        mock_is_dup.return_value = True
+
         # New finding matches existing
         mock_finding = MagicMock()
         mock_finding.title = "[P1] Fix this"
         mock_finding.body = "Some body"
         mock_finding.code_location.absolute_file_path = "file.py"
         mock_finding.code_location.line_range.start = 10
-        
+
         mock_parsed = MagicMock()
         mock_parsed.findings = [mock_finding]
         mock_parsed.overall_correctness = None
         mock_parsed.overall_explanation = None
         mock_parse.return_value = mock_parsed
-        
+
         # Run
         _post_gitlab_inline_review("owner", "repo", 1, "json_output", None)
-        
+
         # precise assertions
         mock_get_discussions.assert_called_once()
+        mock_is_dup.assert_called_once()  # Duplicate check was called
         mock_create_discussion.assert_not_called() # Should be skipped
         
     @patch("hodor.agent.get_latest_mr_diff_refs")
@@ -88,23 +99,25 @@ class TestGitLabReview(unittest.TestCase):
     @patch("hodor.agent.post_gitlab_mr_discussion")
     @patch("hodor.agent.post_gitlab_mr_comment")
     @patch("hodor.agent.parse_review_output")
-    def test_no_thread_on_success(self, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
+    @patch("hodor.agent.parse_existing_comments")
+    def test_no_thread_on_success(self, mock_parse_existing, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that no thread is opened if no findings (just summary)."""
-        
+
         # Setup mocks
         mock_get_refs.return_value = {}
         mock_get_discussions.return_value = []
-        
+        mock_parse_existing.return_value = []
+
         # No findings, but overall explanation
         mock_parsed = MagicMock()
         mock_parsed.findings = []
         mock_parsed.overall_correctness = "patch is correct"
         mock_parsed.overall_explanation = "Good job"
         mock_parse.return_value = mock_parsed
-        
+
         # Run
         _post_gitlab_inline_review("owner", "repo", 1, "json_output", None)
-        
+
         # Should post COMMENT, not DISCUSSION
         mock_post_comment.assert_called_once()
         mock_post_discussion.assert_not_called()
@@ -115,29 +128,33 @@ class TestGitLabReview(unittest.TestCase):
     @patch("hodor.agent.post_gitlab_mr_discussion")
     @patch("hodor.agent.post_gitlab_mr_comment")
     @patch("hodor.agent.parse_review_output")
-    def test_thread_on_failure(self, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
+    @patch("hodor.agent.parse_existing_comments")
+    @patch("hodor.agent.is_duplicate_finding")
+    def test_thread_on_failure(self, mock_is_dup, mock_parse_existing, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that summaries are posted as comments even if findings exist."""
-        
+
         # Setup mocks
         mock_get_refs.return_value = {}
         mock_get_discussions.return_value = []
-        
+        mock_parse_existing.return_value = []
+        mock_is_dup.return_value = False  # Not a duplicate
+
         # Findings exist
         mock_finding = MagicMock()
         mock_finding.title = "Bug"
         mock_finding.body = "Fix it"
         mock_finding.code_location.absolute_file_path = "file.py"
         mock_finding.code_location.line_range.start = 10
-        
+
         mock_parsed = MagicMock()
         mock_parsed.findings = [mock_finding]
         mock_parsed.overall_correctness = "blocking issues"
         mock_parsed.overall_explanation = "Bad code"
         mock_parse.return_value = mock_parsed
-        
+
         # Run
         _post_gitlab_inline_review("owner", "repo", 1, "json_output", None)
-        
+
         # Should post COMMENT for summary per user request
         mock_post_comment.assert_called_once()
         mock_post_discussion.assert_not_called()

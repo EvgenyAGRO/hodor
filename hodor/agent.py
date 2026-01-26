@@ -28,6 +28,7 @@ from .prompts.pr_review_prompt import build_pr_review_prompt
 from .review_parser import parse_review_output
 from .skills import discover_skills
 from .workspace import cleanup_workspace, setup_workspace
+from .duplicate_detector import parse_existing_comments, is_duplicate_finding
 
 # Load environment variables
 load_dotenv()
@@ -234,21 +235,11 @@ def _post_gitlab_inline_review(
     except Exception as e:
         logger.warning(f"Failed to fetch existing discussions for deduplication: {e}")
 
-    # Build a lookup of existing comments
-    # Key: (file_path, line_number, validation_key) -> True
-    # validation_key is a snippet of the title or body to identify the issue
-    existing_comments = set()
-    for discussion in existing_discussions:
-        for note in discussion.get("notes", []):
-            position = note.get("position") or {}
-            file_path = position.get("new_path")
-            line = position.get("new_line")
-            body = note.get("body", "")
-
-            if file_path and line:
-                existing_comments.add((file_path, line, body))
+    # Parse existing comments into normalized format for duplicate detection
+    existing_comments = parse_existing_comments(existing_discussions, platform="gitlab")
 
     posted_count = 0
+    skipped_count = 0
     errors = []
 
     # Post findings as discussions
@@ -257,16 +248,18 @@ def _post_gitlab_inline_review(
         start_line = finding.code_location.line_range.start
         title = finding.title
 
-        # Check for duplicates using fuzzy matching on body/title
-        is_duplicate = False
-        for (ex_path, ex_line, ex_body) in existing_comments:
-            if ex_path == file_path and ex_line == start_line:
-                if title in ex_body:  # Simple check: if title is in the existing comment
-                    is_duplicate = True
-                    break
+        # Build finding dict for duplicate check
+        new_finding = {
+            "path": file_path,
+            "line": start_line,
+            "title": title,
+            "body": finding.body,
+        }
 
-        if is_duplicate:
+        # Check for duplicates using improved fuzzy matching
+        if is_duplicate_finding(new_finding, existing_comments):
             logger.info(f"Skipping duplicate finding at {file_path}:{start_line} ('{title}')")
+            skipped_count += 1
             continue
 
         body = f"**{finding.title}**\n\n{finding.body}"
@@ -284,11 +277,18 @@ def _post_gitlab_inline_review(
                 host=host,
             )
             posted_count += 1
-            # Add to local set to avoid duplicates within same run
-            existing_comments.add((file_path, start_line, body))
+            # Add to existing comments to avoid duplicates within same run
+            existing_comments.append({
+                "path": file_path,
+                "line": start_line,
+                "body": body,
+            })
         except Exception as e:
             errors.append(str(e))
             logger.error(f"Failed to post finding at {file_path}:{start_line}: {e}")
+
+    if skipped_count > 0:
+        logger.info(f"Skipped {skipped_count} duplicate findings")
 
     # If there's an overall explanation/verdict
     if parsed.overall_correctness or parsed.overall_explanation:
