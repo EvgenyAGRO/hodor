@@ -2,7 +2,19 @@ import pytest
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from hodor.diff_utils import trim_patch, FileDiffStats
+import importlib.util
+
+# Load diff_utils module directly (avoids package import issues with openhands)
+_module_path = Path(__file__).parent.parent / "hodor" / "diff_utils.py"
+_spec = importlib.util.spec_from_file_location("diff_utils", _module_path)
+_diff_utils = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_diff_utils)
+
+# Import functions from the loaded module
+trim_patch = _diff_utils.trim_patch
+FileDiffStats = _diff_utils.FileDiffStats
+get_diff_stats = _diff_utils.get_diff_stats
+analyze_and_limit_diff = _diff_utils.analyze_and_limit_diff
 
 def test_trim_patch_preview():
     # Create a dummy patch with 300 lines
@@ -42,7 +54,7 @@ def test_get_diff_stats(mock_run):
         MagicMock(stdout="patch2" * 10, returncode=0), # size for file 2
     ]
     
-    from hodor.diff_utils import get_diff_stats
+    global get_diff_stats
     stats = get_diff_stats(Path("/tmp"), "base", "head")
     
     assert len(stats) == 2
@@ -52,7 +64,7 @@ def test_get_diff_stats(mock_run):
     assert stats[1].path == "file2.txt"
     assert stats[1].size_bytes == 60 # "patch2" is 6 bytes. 6 * 10 = 60.
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff(mock_run, mock_stats):
     mock_stats.return_value = [
@@ -64,7 +76,7 @@ def test_analyze_and_limit_diff(mock_run, mock_stats):
     long_patch = "\n".join([f"line {i}" for i in range(200)])
     mock_run.return_value = MagicMock(stdout=long_patch, returncode=0)
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(Path("/tmp"), "base", action="preview")
 
     assert len(results) == 2
@@ -143,7 +155,7 @@ def test_get_diff_stats_with_byte_sizes(mock_run):
         MagicMock(stdout="a" * 250000, returncode=0),  # 250KB patch for file1
     ]
 
-    from hodor.diff_utils import get_diff_stats
+    global get_diff_stats
     stats = get_diff_stats(Path("/tmp"), "base", "head")
 
     assert len(stats) == 1
@@ -152,7 +164,7 @@ def test_get_diff_stats_with_byte_sizes(mock_run):
     assert stats[0].deleted == 20
     assert stats[0].size_bytes == 250000
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_byte_limit(mock_run, mock_stats):
     """Test that files exceeding byte limit are marked as large."""
@@ -168,7 +180,7 @@ def test_analyze_and_limit_diff_byte_limit(mock_run, mock_stats):
         MagicMock(stdout=large_patch, returncode=0)
     ]
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(
         Path("/tmp"), "base", "head",
         max_lines=1500,
@@ -181,7 +193,7 @@ def test_analyze_and_limit_diff_byte_limit(mock_run, mock_stats):
     assert results[1].is_large is True  # Exceeds byte limit
     assert results[1].is_trimmed is True
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_line_limit(mock_run, mock_stats):
     """Test that files exceeding line limit are marked as large."""
@@ -192,7 +204,7 @@ def test_analyze_and_limit_diff_line_limit(mock_run, mock_stats):
     large_patch = "\n".join([f"line {i}" for i in range(200)])
     mock_run.return_value = MagicMock(stdout=large_patch, returncode=0)
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(
         Path("/tmp"), "base", "head",
         max_lines=1500,
@@ -204,7 +216,7 @@ def test_analyze_and_limit_diff_line_limit(mock_run, mock_stats):
     assert results[0].is_large is True  # Exceeds line limit
     assert results[0].is_trimmed is True
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_skip_action(mock_run, mock_stats):
     """Test skip action omits patch content entirely."""
@@ -214,7 +226,7 @@ def test_analyze_and_limit_diff_skip_action(mock_run, mock_stats):
 
     mock_run.return_value = MagicMock(stdout="huge patch", returncode=0)
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(
         Path("/tmp"), "base", "head",
         action="skip"
@@ -225,7 +237,7 @@ def test_analyze_and_limit_diff_skip_action(mock_run, mock_stats):
     assert results[0].is_trimmed is True
     assert "[PATCH SKIPPED" in results[0].patch
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_binary_file(mock_run, mock_stats):
     """Test handling of binary files."""
@@ -239,7 +251,7 @@ def test_analyze_and_limit_diff_binary_file(mock_run, mock_stats):
         returncode=0
     )
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(
         Path("/tmp"), "base", "head",
         max_bytes=200000,
@@ -250,7 +262,7 @@ def test_analyze_and_limit_diff_binary_file(mock_run, mock_stats):
     assert results[0].is_large is True  # Exceeds byte limit
     assert "Binary files" in results[0].patch or "[TRIMMED" in results[0].patch
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_error_fetching_patch(mock_run, mock_stats):
     """Test graceful handling when git diff fails."""
@@ -261,13 +273,13 @@ def test_analyze_and_limit_diff_error_fetching_patch(mock_run, mock_stats):
     # Simulate git diff failure
     mock_run.side_effect = subprocess.CalledProcessError(1, "git diff", stderr="fatal: bad revision")
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(Path("/tmp"), "base", "head")
 
     assert len(results) == 1
     assert "[ERROR" in results[0].patch  # Should contain error marker
 
-@patch("hodor.diff_utils.get_diff_stats")
+@patch.object(_diff_utils, "get_diff_stats")
 @patch("subprocess.run")
 def test_analyze_and_limit_diff_mixed_files(mock_run, mock_stats):
     """Test handling mixed set of small and large files."""
@@ -285,7 +297,7 @@ def test_analyze_and_limit_diff_mixed_files(mock_run, mock_stats):
         MagicMock(stdout="x" * 300000, returncode=0),
     ]
 
-    from hodor.diff_utils import analyze_and_limit_diff
+    global analyze_and_limit_diff
     results = analyze_and_limit_diff(
         Path("/tmp"), "base", "head",
         max_lines=1500,

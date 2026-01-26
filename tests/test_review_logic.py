@@ -45,12 +45,11 @@ class TestGitLabReview(unittest.TestCase):
     @patch("hodor.agent.get_latest_mr_diff_refs")
     @patch("hodor.agent.get_merge_request_discussions")
     @patch("hodor.agent.create_mr_discussion")
-    @patch("hodor.agent.post_gitlab_mr_discussion")
     @patch("hodor.agent.post_gitlab_mr_comment")
     @patch("hodor.agent.parse_review_output")
     @patch("hodor.agent.parse_existing_comments")
     @patch("hodor.agent.is_duplicate_finding")
-    def test_duplicate_check(self, mock_is_dup, mock_parse_existing, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
+    def test_duplicate_check(self, mock_is_dup, mock_parse_existing, mock_parse, mock_post_comment, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that duplicate comments are skipped."""
 
         # Setup mocks
@@ -96,11 +95,10 @@ class TestGitLabReview(unittest.TestCase):
     @patch("hodor.agent.get_latest_mr_diff_refs")
     @patch("hodor.agent.get_merge_request_discussions")
     @patch("hodor.agent.create_mr_discussion")
-    @patch("hodor.agent.post_gitlab_mr_discussion")
     @patch("hodor.agent.post_gitlab_mr_comment")
     @patch("hodor.agent.parse_review_output")
     @patch("hodor.agent.parse_existing_comments")
-    def test_no_thread_on_success(self, mock_parse_existing, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
+    def test_no_thread_on_success(self, mock_parse_existing, mock_parse, mock_post_comment, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that no thread is opened if no findings (just summary)."""
 
         # Setup mocks
@@ -118,19 +116,18 @@ class TestGitLabReview(unittest.TestCase):
         # Run
         _post_gitlab_inline_review("owner", "repo", 1, "json_output", None)
 
-        # Should post COMMENT, not DISCUSSION
+        # Should post COMMENT, not DISCUSSION (inline thread)
         mock_post_comment.assert_called_once()
-        mock_post_discussion.assert_not_called()
+        mock_create_discussion.assert_not_called()
         
     @patch("hodor.agent.get_latest_mr_diff_refs")
     @patch("hodor.agent.get_merge_request_discussions")
     @patch("hodor.agent.create_mr_discussion")
-    @patch("hodor.agent.post_gitlab_mr_discussion")
     @patch("hodor.agent.post_gitlab_mr_comment")
     @patch("hodor.agent.parse_review_output")
     @patch("hodor.agent.parse_existing_comments")
     @patch("hodor.agent.is_duplicate_finding")
-    def test_thread_on_failure(self, mock_is_dup, mock_parse_existing, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
+    def test_thread_on_failure(self, mock_is_dup, mock_parse_existing, mock_parse, mock_post_comment, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that summaries are posted as comments even if findings exist."""
 
         # Setup mocks
@@ -157,7 +154,7 @@ class TestGitLabReview(unittest.TestCase):
 
         # Should post COMMENT for summary per user request
         mock_post_comment.assert_called_once()
-        mock_post_discussion.assert_not_called()
+        mock_create_discussion.assert_called_once() # The finding (still a discussion/thread)
         mock_create_discussion.assert_called_once() # The finding (still a discussion/thread)
 
 if __name__ == "__main__":
