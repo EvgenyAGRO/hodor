@@ -14,6 +14,10 @@ Identify production bugs in the diff only. You are in READ-ONLY mode.
 
 {jira_context_section}
 
+{large_diffs_section}
+
+{pre_provided_patches_section}
+
 ## Step 1: List Changed Files (MANDATORY FIRST STEP)
 
 **Run this command FIRST:**
@@ -51,8 +55,24 @@ export GIT_PAGER=cat
 **Available commands:**
 - `{pr_diff_cmd}` - List changed files ONLY (run this FIRST)
 - `{git_diff_cmd} -- path/to/file` - See changes for ONE specific file
-- `grep` - Search for patterns across multiple files
+- `git grep` - Search for patterns in tracked files (preferred over grep)
 - `planning_file_editor` - Read full file with context (use sparingly)
+
+## Safe Command Policy (CRITICAL)
+
+To avoid timeouts, follow these rules:
+
+### DO NOT:
+- Run `grep -r` at repository root (use `git grep` instead)
+- Print entire large files (use `head`/`tail`)
+- Run unbounded `find` commands
+
+### ALWAYS:
+- Use `git grep "pattern" -- "*.py"` with file globs
+- Use `head -100 file` for large files
+- Wrap slow commands with `timeout 20s <command>`
+
+If a command times out, retry with narrower scope and continue.
 
 ## Review Guidelines
 

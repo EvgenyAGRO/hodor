@@ -213,8 +213,38 @@ hodor-review:
     LLM_API_KEY: $LLM_API_KEY
     GITLAB_TOKEN: $GITLAB_TOKEN
   script:
-    - hodor "${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}" --post
-  allow_failure: true
+    - hodor "${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}" --post --json
+  # Hodor uses fail-soft mode by default: always posts a review and exits 0
+```
+
+### Recommended CI Configuration
+
+For robust CI usage (handles large diffs, timeouts, and edge cases gracefully):
+
+```yaml
+# .gitlab-ci.yml - Production-ready configuration
+hodor-review:
+  image: ghcr.io/mr-karan/hodor:latest
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    LLM_API_KEY: $LLM_API_KEY
+    GITLAB_TOKEN: $GITLAB_TOKEN
+    # Optional: Customize diff limits for your repo
+    # HODOR_MAX_DIFF_LINES: "2000"
+    # HODOR_MAX_DIFF_BYTES: "300000"
+  script:
+    - |
+      hodor "${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID}" \
+        --model gemini/gemini-3-flash-preview \
+        --json \
+        --post \
+        --max-file-diff-lines 1500 \
+        --max-file-diff-bytes 200000 \
+        --large-diff-action preview
+  # No allow_failure needed: Hodor exits 0 by default (fail-soft mode)
+  # Use --fail-on-review-error if you want CI to fail when review fails
 ```
 
 See [AUTOMATED_REVIEWS.md](./docs/AUTOMATED_REVIEWS.md) for advanced workflows.
@@ -234,7 +264,39 @@ See [AUTOMATED_REVIEWS.md](./docs/AUTOMATED_REVIEWS.md) for advanced workflows.
 | `--prompt-file` | – | Replace base prompt with a custom markdown file. |
 | `--workspace` | Temp dir | Directory for repo checkout. Re-use for faster multi-PR reviews. |
 | `--post` | Off | Auto-post review comment to GitHub/GitLab. |
+| `--json` | Off | Output structured JSON format (useful for CI/CD automation). |
 | `--verbose` | Off | Stream agent events in real-time. |
+| `--max-file-diff-lines` | `1500` | Maximum lines per file diff before trimming. |
+| `--max-file-diff-bytes` | `200000` | Maximum bytes per file diff before trimming (200KB). |
+| `--large-diff-action` | `preview` | Action for large diffs: `skip`, `preview`, `sample`, `summarize`. |
+| `--fail-on-review-error` | Off | Exit with error code if review fails (default: fail-soft, exit 0). |
+
+### Large Diff Handling
+
+Hodor automatically handles large diffs to prevent prompt explosion and timeouts:
+
+| Action | Description |
+|--------|-------------|
+| `preview` | Show first 80 + last 80 lines with "[TRIMMED]" marker (default) |
+| `sample` | Show first 2 hunks + last hunk with "[SAMPLED]" marker |
+| `summarize` | Show only file stats (line count, byte size) - no content |
+| `skip` | Skip the file entirely with "[SKIPPED]" marker |
+
+Files exceeding either `--max-file-diff-lines` OR `--max-file-diff-bytes` are trimmed.
+
+### Fail-Soft Mode (Default)
+
+Hodor uses **fail-soft mode** by default for CI robustness:
+
+- If the agent gets stuck, times out, or produces empty output, Hodor generates a **fallback review** with:
+  - List of changed files
+  - Identification of trimmed/skipped files with reasons
+  - Basic guidance to manually review large changes
+- The fallback review is valid JSON (when `--json` is set) and can be posted to the MR
+- **Exit code is always 0** unless `--fail-on-review-error` is set
+- Workspace cleanup errors are logged as warnings, never fail the job
+
+Use `--fail-on-review-error` only if you want CI to fail when the review cannot be completed.
 
 **Environment Variables**
 

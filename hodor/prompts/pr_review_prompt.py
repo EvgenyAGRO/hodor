@@ -29,6 +29,10 @@ def build_pr_review_prompt(
     custom_instructions: str | None = None,
     custom_prompt_file: Path | None = None,
     output_format: str = "markdown",
+    workspace_path: Path | None = None,
+    max_diff_lines: int = 1500,
+    max_diff_bytes: int = 200000,
+    large_diff_action: str = "preview",
 ) -> str:
     """Build a PR review prompt for OpenHands agent.
 
@@ -113,6 +117,43 @@ def build_pr_review_prompt(
             f"Template file is required for code review."
         )
 
+    # Step 2.5: Analyze diff if workspace is available
+    large_diffs_section = ""
+    pre_provided_patches_section = ""
+    if workspace_path and diff_base_sha:
+        from ..diff_utils import analyze_and_limit_diff
+        
+        # We use HEAD as the head_sha for the diff
+        diff_stats = analyze_and_limit_diff(
+            workspace_path, 
+            diff_base_sha, 
+            "HEAD", 
+            max_diff_lines, 
+            max_diff_bytes, 
+            large_diff_action
+        )
+        
+        large_files = [s for s in diff_stats if s.is_large]
+        small_files = [s for s in diff_stats if not s.is_large]
+        
+        if large_files:
+            lines = ["## Large Files (Trimmed/Skipped)"]
+            lines.append("The following files exceed review size limits and have been partially included or skipped:")
+            for s in large_files:
+                reason = "lines" if s.added + s.deleted > max_diff_lines else "bytes"
+                lines.append(f"- `{s.path}`: {s.added + s.deleted} lines, {s.size_bytes} bytes (Limit exceeded by {reason})")
+                if s.patch:
+                    lines.append(f"\n<details><summary>Preview of {s.path}</summary>\n\n```patch\n{s.patch}\n```\n</details>\n")
+            large_diffs_section = "\n".join(lines) + "\n"
+            
+        if small_files:
+            lines = ["## Pre-provided Patches (Small Files)"]
+            lines.append("To save you time, here are the patches for smaller files in this PR:")
+            for s in small_files:
+                if s.patch:
+                    lines.append(f"### `{s.path}`\n```patch\n{s.patch}\n```\n")
+            pre_provided_patches_section = "\n".join(lines) + "\n"
+
     # Step 3: Interpolate template variables
     mr_context_section, mr_notes_section, mr_reminder_section = _build_mr_sections(mr_metadata)
 
@@ -135,6 +176,8 @@ def build_pr_review_prompt(
             mr_notes_section=mr_notes_section,
             mr_reminder_section=mr_reminder_section,
             jira_context_section=jira_context_section,
+            large_diffs_section=large_diffs_section,
+            pre_provided_patches_section=pre_provided_patches_section,
         )
         logger.info("Successfully interpolated template")
     except KeyError as e:

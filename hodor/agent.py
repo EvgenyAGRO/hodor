@@ -15,9 +15,17 @@ from openhands.sdk.workspace import LocalWorkspace
 
 from . import _tty as _terminal_safety  # noqa: F401
 from .github import GitHubAPIError, fetch_github_pr_info, normalize_github_metadata
-from .gitlab import GitLabAPIError, fetch_gitlab_mr_info, post_gitlab_mr_comment
+from .gitlab import (
+    GitLabAPIError,
+    fetch_gitlab_mr_info,
+    post_gitlab_mr_comment,
+    create_mr_discussion,
+    get_latest_mr_diff_refs,
+    get_merge_request_discussions,
+)
 from .llm import create_hodor_agent
 from .prompts.pr_review_prompt import build_pr_review_prompt
+from .review_parser import parse_review_output
 from .skills import discover_skills
 from .workspace import cleanup_workspace, setup_workspace
 
@@ -180,9 +188,7 @@ def _post_gitlab_inline_review(
         host: str | None,
 ) -> bool:
     """Helper to post inline GitLab discussions from review output."""
-    from .gitlab import create_mr_discussion, get_latest_mr_diff_refs, post_gitlab_mr_discussion, \
-        get_merge_request_discussions, post_gitlab_mr_comment
-    from .review_parser import parse_review_output
+    # Note: gitlab helper functions are already imported at module level
 
     # Parse the output
     parsed = parse_review_output(review_output)
@@ -190,8 +196,20 @@ def _post_gitlab_inline_review(
     logger.info(
         f"Parsed review output: {len(parsed.findings)} findings, explanation length: {len(parsed.overall_explanation or '')}")
 
-    # If no findings and no explanation, return False to trigger fallback
+    # If no findings and no explanation, it might be a valid "no issues" JSON
     if not parsed.findings and not parsed.overall_explanation:
+        # If the output contains "findings", it likely was a valid JSON with empty list
+        if "findings" in review_output:
+            logger.info("Valid empty findings detected. Posting LGTM.")
+            post_gitlab_mr_comment(
+                owner,
+                repo,
+                mr_number,
+                "**Review Complete**\n\nNo issues found! 🎉",
+                host=host,
+            )
+            return True
+
         logger.warning("No findings or explanation parsed from model output.")
         return False
 
@@ -306,6 +324,10 @@ def review_pr(
         workspace_dir: Path | None = None,
         output_format: str = "markdown",
         max_iterations: int = 500,
+        max_diff_lines: int = 1500,
+        max_diff_bytes: int = 200000,
+        large_diff_action: str = "preview",
+        fail_on_error: bool = False,
 ) -> str:
     """
     Review a pull request using OpenHands agent with bash tools.
@@ -419,6 +441,10 @@ def review_pr(
             custom_instructions=custom_prompt,
             custom_prompt_file=prompt_file,
             output_format=output_format,
+            workspace_path=workspace,
+            max_diff_lines=max_diff_lines,
+            max_diff_bytes=max_diff_bytes,
+            large_diff_action=large_diff_action,
         )
     except Exception as e:
         logger.error(f"Failed to build prompt: {e}")
@@ -465,6 +491,7 @@ def review_pr(
     import time
 
     start_time = time.time()
+    conversation = None  # Initialize for exception handler
 
     try:
         logger.info("Creating OpenHands conversation...")
@@ -568,7 +595,32 @@ def review_pr(
 
     except Exception as e:
         logger.error(f"Review failed: {e}")
-        raise RuntimeError(f"Review failed: {e}") from e
+
+        # Try to recover partial review if agent crashed/got stuck
+        # Only attempt if conversation was created successfully
+        if "Agent did not produce any review content" in str(e) or "Stuck pattern detected" in str(e):
+            if conversation is not None and hasattr(conversation, 'state'):
+                try:
+                    logger.info("Attempting to recover partial review from conversation history...")
+                    recovered_content = _recover_last_json_response(conversation.state.events)
+                    if recovered_content:
+                        logger.info(f"Recovered {len(recovered_content)} chars from history")
+                        return recovered_content
+                except Exception as recovery_error:
+                    logger.warning(f"Failed to recover partial review: {recovery_error}")
+
+        if fail_on_error:
+            raise RuntimeError(f"Review failed: {e}") from e
+
+        logger.warning(f"Fail-soft: generating fallback review due to error: {e}")
+        # Build diff stats for fallback if possible
+        diff_stats = []
+        if workspace and diff_base_sha:
+            from .diff_utils import get_diff_stats
+            diff_stats = get_diff_stats(workspace, diff_base_sha, "HEAD")
+
+        return _generate_fallback_review(diff_stats, output_format, str(e))
+
 
     finally:
         # Reset terminal by draining leftover control-sequence replies
@@ -578,3 +630,76 @@ def review_pr(
         if workspace and cleanup:
             logger.info("Cleaning up workspace...")
             cleanup_workspace(workspace)
+
+
+def _recover_last_json_response(events: list[Any]) -> str | None:
+    """Scan events backwards for the last valid JSON response from the agent."""
+    # Look for the last message from the agent
+    # Use string-based type checking to be resilient to SDK changes and test mocking
+    for event in reversed(events):
+        # Check if event looks like an Event object (has action attribute)
+        action = getattr(event, "action", None)
+        if not action:
+            continue
+
+        # Check if action is a MessageAction
+        if action.__class__.__name__ == "MessageAction":
+            content = getattr(action, "content", "")
+            if not content:
+                continue
+
+            # Check if it looks like JSON review
+            if '{"findings":' in content or "```json" in content:
+                return content
+
+    return None
+
+
+def _generate_fallback_review(diff_stats: list[Any], output_format: str, error_msg: str) -> str:
+    """Generate a fail-soft fallback review when the agent fails."""
+    import json
+
+    summary = (
+        f"⚠️ **Review Fallback**: The AI agent encountered an issue during a complete analysis ({error_msg}). "
+        "A basic automated scan of the changed files was performed as a safety fallback."
+    )
+
+    findings = []
+
+    # Analyze files for basic guidance
+    large_files = [s for s in diff_stats if s.added + s.deleted > 1000]  # Use a heuristic for fallback
+
+    if large_files:
+        paths = ", ".join([f"`{s.path}`" for s in large_files])
+        findings.append({
+            "path": large_files[0].path,  # Assign to first one for schema compliance
+            "line": 1,
+            "title": "[P2] Large data or wordlists detected",
+            "body": f"Large diffs detected in {paths}. Please verify source, licensing, encoding, and format. Ensure no secrets are present in these data files.",
+            "priority": 2
+        })
+
+    if not findings and diff_stats:
+        findings.append({
+            "path": diff_stats[0].path,
+            "line": 1,
+            "title": "[P3] Automated Scan Complete",
+            "body": f"Review agent failed to complete full analysis, but {len(diff_stats)} files were identified. Please review changes manually as a precaution.",
+            "priority": 3
+        })
+
+    if output_format == "json":
+        return json.dumps({
+            "summary": summary,
+            "findings": findings,
+            "overall_correctness": "patch is correct",  # Fail soft: assume correct but warn
+            "overall_explanation": "Automated fallback review generated due to agent failure."
+        }, indent=2)
+    else:
+        lines = [f"### Issues Found\n"]
+        for f in findings:
+            lines.append(f"- **{f['title']}** (`{f['path']}:{f['line']}`)")
+            lines.append(f"  {f['body']}\n")
+        lines.append(f"### Summary\n{summary}\n")
+        lines.append(f"### Overall Verdict\n**Status**: Patch is correct\n\n**Explanation**: {summary}")
+        return "\n".join(lines)

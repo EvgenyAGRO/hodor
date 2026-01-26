@@ -41,13 +41,13 @@ sys.modules["openhands.tools.preset.default"] = MagicMock()
 from hodor.agent import _post_gitlab_inline_review
 
 class TestGitLabReview(unittest.TestCase):
-    
-    @patch("hodor.gitlab.get_latest_mr_diff_refs")
-    @patch("hodor.gitlab.get_merge_request_discussions")
-    @patch("hodor.gitlab.create_mr_discussion")
-    @patch("hodor.gitlab.post_gitlab_mr_discussion")
-    @patch("hodor.gitlab.post_gitlab_mr_comment")
-    @patch("hodor.review_parser.parse_review_output")
+
+    @patch("hodor.agent.get_latest_mr_diff_refs")
+    @patch("hodor.agent.get_merge_request_discussions")
+    @patch("hodor.agent.create_mr_discussion")
+    @patch("hodor.agent.post_gitlab_mr_discussion")
+    @patch("hodor.agent.post_gitlab_mr_comment")
+    @patch("hodor.agent.parse_review_output")
     def test_duplicate_check(self, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that duplicate comments are skipped."""
         
@@ -82,12 +82,12 @@ class TestGitLabReview(unittest.TestCase):
         mock_get_discussions.assert_called_once()
         mock_create_discussion.assert_not_called() # Should be skipped
         
-    @patch("hodor.gitlab.get_latest_mr_diff_refs")
-    @patch("hodor.gitlab.get_merge_request_discussions")
-    @patch("hodor.gitlab.create_mr_discussion")
-    @patch("hodor.gitlab.post_gitlab_mr_discussion")
-    @patch("hodor.gitlab.post_gitlab_mr_comment")
-    @patch("hodor.review_parser.parse_review_output")
+    @patch("hodor.agent.get_latest_mr_diff_refs")
+    @patch("hodor.agent.get_merge_request_discussions")
+    @patch("hodor.agent.create_mr_discussion")
+    @patch("hodor.agent.post_gitlab_mr_discussion")
+    @patch("hodor.agent.post_gitlab_mr_comment")
+    @patch("hodor.agent.parse_review_output")
     def test_no_thread_on_success(self, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that no thread is opened if no findings (just summary)."""
         
@@ -109,12 +109,12 @@ class TestGitLabReview(unittest.TestCase):
         mock_post_comment.assert_called_once()
         mock_post_discussion.assert_not_called()
         
-    @patch("hodor.gitlab.get_latest_mr_diff_refs")
-    @patch("hodor.gitlab.get_merge_request_discussions")
-    @patch("hodor.gitlab.create_mr_discussion")
-    @patch("hodor.gitlab.post_gitlab_mr_discussion")
-    @patch("hodor.gitlab.post_gitlab_mr_comment")
-    @patch("hodor.review_parser.parse_review_output")
+    @patch("hodor.agent.get_latest_mr_diff_refs")
+    @patch("hodor.agent.get_merge_request_discussions")
+    @patch("hodor.agent.create_mr_discussion")
+    @patch("hodor.agent.post_gitlab_mr_discussion")
+    @patch("hodor.agent.post_gitlab_mr_comment")
+    @patch("hodor.agent.parse_review_output")
     def test_thread_on_failure(self, mock_parse, mock_post_comment, mock_post_discussion, mock_create_discussion, mock_get_discussions, mock_get_refs):
         """Test that summaries are posted as comments even if findings exist."""
         

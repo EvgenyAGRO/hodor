@@ -2,18 +2,16 @@
 
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
-
-from . import _tty as _terminal_safety  # noqa: F401
 
 import click
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from .agent import detect_platform, parse_pr_url, post_review_comment, review_pr
+from . import _tty as _terminal_safety  # noqa: F401
+from .agent import detect_platform, post_review_comment, review_pr
 
 console = Console()
 
@@ -113,24 +111,52 @@ def parse_llm_args(ctx, param, value):
     help="Maximum number of agent iterations/steps (default: 500, use -1 for unlimited)",
 )
 @click.option(
+    "--max-file-diff-lines",
+    default=1500,
+    type=int,
+    help="Maximum lines allowed per file diff before trimming (default: 1500)",
+)
+@click.option(
+    "--max-file-diff-bytes",
+    default=200000,
+    type=int,
+    help="Maximum bytes allowed per file diff before trimming (default: 200,000)",
+)
+@click.option(
+    "--large-diff-action",
+    type=click.Choice(["skip", "preview", "sample", "summarize"], case_sensitive=False),
+    default="preview",
+    help="Action to take for large diffs (default: preview)",
+)
+@click.option(
+    "--fail-on-review-error",
+    is_flag=True,
+    default=False,
+    help="Fail the CI job if review fails (default: False/fail-soft)",
+)
+@click.option(
     "--ultrathink",
     is_flag=True,
     help="Enable maximum reasoning effort with extended thinking budget (shortcut for --reasoning-effort high)",
 )
 def main(
-    pr_url: str,
-    model: str,
-    temperature: float | None,
-    reasoning_effort: str | None,
-    verbose: bool,
-    llm: dict,
-    post: bool,
-    output_json: bool,
-    prompt: str | None,
-    prompt_file: str | None,
-    workspace: str | None,
-    max_iterations: int,
-    ultrathink: bool,
+        pr_url: str,
+        model: str,
+        temperature: float | None,
+        reasoning_effort: str | None,
+        verbose: bool,
+        llm: dict,
+        post: bool,
+        output_json: bool,
+        prompt: str | None,
+        prompt_file: str | None,
+        workspace: str | None,
+        max_iterations: int,
+        max_file_diff_lines: int,
+        max_file_diff_bytes: int,
+        large_diff_action: str,
+        fail_on_review_error: bool,
+        ultrathink: bool,
 ):
     """
     Review a GitHub pull request or GitLab merge request using AI.
@@ -220,10 +246,10 @@ def main(
 
     try:
         with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True,
         ) as progress:
             task = progress.add_task("Setting up workspace and running review...", total=None)
 
@@ -242,6 +268,10 @@ def main(
                 workspace_dir=workspace_path,
                 output_format="json" if output_json else "markdown",
                 max_iterations=max_iterations,
+                max_diff_lines=max_file_diff_lines,
+                max_diff_bytes=max_file_diff_bytes,
+                large_diff_action=large_diff_action,
+                fail_on_error=fail_on_review_error,
             )
 
             progress.update(task, description="Review complete!")
