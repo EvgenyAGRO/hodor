@@ -93,4 +93,17 @@ disallow_untyped_defs = false
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --cov=hodor --cov-report=term-missing"
+addopts = "-v --cov=hodor --cov-report=term-missing --cov-fail-under=70"
+
+[tool.coverage.run]
+source = ["hodor"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

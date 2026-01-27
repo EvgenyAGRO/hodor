@@ -14,6 +14,7 @@ from typing import Any
 import gitlab
 from gitlab import exceptions as gitlab_exceptions
 
+from .retry import retry_api
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ def _serialize_notes(mr: Any) -> list[dict[str, Any]]:
     return [note.attributes for note in notes]
 
 
+@retry_api()
 def fetch_gitlab_mr_info(
     owner: str,
     repo: str,
@@ -126,7 +128,10 @@ def fetch_gitlab_mr_info(
     *,
     include_comments: bool = False,
 ) -> dict[str, Any]:
-    """Return merge request metadata using python-gitlab."""
+    """Return merge request metadata using python-gitlab.
+
+    Retries on transient failures with exponential backoff.
+    """
 
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)
@@ -139,6 +144,7 @@ def fetch_gitlab_mr_info(
     return mr_data
 
 
+@retry_api()
 def post_gitlab_mr_comment(
     owner: str,
     repo: str,
@@ -147,7 +153,10 @@ def post_gitlab_mr_comment(
     *,
     host: str | None = None,
 ) -> dict[str, Any]:
-    """Post a top-level note on a GitLab merge request."""
+    """Post a top-level note on a GitLab merge request.
+
+    Retries on transient failures with exponential backoff.
+    """
 
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)
@@ -165,6 +174,7 @@ def post_gitlab_mr_comment(
     return note.attributes
 
 
+@retry_api()
 def post_gitlab_mr_discussion(
     owner: str,
     repo: str,
@@ -173,7 +183,10 @@ def post_gitlab_mr_discussion(
     *,
     host: str | None = None,
 ) -> dict[str, Any]:
-    """Post a top-level discussion (resolvable thread) on a GitLab merge request."""
+    """Post a top-level discussion (resolvable thread) on a GitLab merge request.
+
+    Retries on transient failures with exponential backoff.
+    """
 
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)
@@ -191,6 +204,7 @@ def post_gitlab_mr_discussion(
     return discussion.attributes
 
 
+@retry_api()
 def get_merge_request_discussions(
     owner: str,
     repo: str,
@@ -198,7 +212,10 @@ def get_merge_request_discussions(
     *,
     host: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch all discussions for a merge request."""
+    """Fetch all discussions for a merge request.
+
+    Retries on transient failures with exponential backoff.
+    """
 
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)
@@ -294,6 +311,7 @@ def summarize_gitlab_notes(
     return "\n".join(lines)
 
 
+@retry_api()
 def get_latest_mr_diff_refs(
     owner: str,
     repo: str,
@@ -306,6 +324,8 @@ def get_latest_mr_diff_refs(
     Strategy:
     1. Check 'diff_refs' attribute (Zero API calls).
     2. Reliable fallback: call REST endpoint directly (1 API call).
+
+    Retries on transient failures with exponential backoff.
     """
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)
@@ -338,6 +358,7 @@ def get_latest_mr_diff_refs(
     return {}
 
 
+@retry_api()
 def create_mr_discussion(
     owner: str,
     repo: str,
@@ -362,6 +383,8 @@ def create_mr_discussion(
         side: "new" (added/changed) or "old" (removed)
         diff_refs: Dict with base_sha, start_sha, head_sha (optional, fetched if missing)
         host: GitLab host instance
+
+    Retries on transient failures with exponential backoff.
     """
     client = _create_gitlab_client(host)
     project = _get_project(client, owner, repo)

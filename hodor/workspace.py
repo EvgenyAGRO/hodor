@@ -14,6 +14,12 @@ from .gitlab import GitLabAPIError, fetch_gitlab_mr_info
 
 logger = logging.getLogger(__name__)
 
+# Timeout constants (seconds)
+CLONE_TIMEOUT = 600  # 10 minutes
+FETCH_TIMEOUT = 300  # 5 minutes
+CHECKOUT_TIMEOUT = 120  # 2 minutes
+GIT_CMD_TIMEOUT = 30  # 30 seconds for simple commands
+
 Platform = Literal["github", "gitlab"]
 
 
@@ -94,6 +100,7 @@ def _is_same_repo(workspace: Path, platform: Platform, owner: str, repo: str) ->
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_CMD_TIMEOUT,
         )
         remote_url = result.stdout.strip()
 
@@ -105,14 +112,14 @@ def _is_same_repo(workspace: Path, platform: Platform, owner: str, repo: str) ->
 
 
 def setup_workspace(
-    platform: Platform,
-    owner: str,
-    repo: str,
-    pr_number: str,
-    host: str | None = None,
-    base_branch: str | None = None,
-    working_dir: Path | None = None,
-    reuse: bool = True,
+        platform: Platform,
+        owner: str,
+        repo: str,
+        pr_number: str,
+        host: str | None = None,
+        base_branch: str | None = None,
+        working_dir: Path | None = None,
+        reuse: bool = True,
 ) -> tuple[Path, str, str | None]:
     """Setup workspace by cloning repo and checking out PR branch.
 
@@ -158,6 +165,7 @@ def setup_workspace(
                     cwd=workspace,
                     check=True,
                     capture_output=True,
+                    timeout=FETCH_TIMEOUT,
                 )
                 logger.info("Fetched latest changes")
             else:
@@ -218,7 +226,12 @@ def _setup_github_workspace(workspace: Path, owner: str, repo: str, pr_number: s
             check=True,
             capture_output=True,
             text=True,
+            timeout=GIT_CMD_TIMEOUT,
         )
+    except subprocess.TimeoutExpired as e:
+        raise WorkspaceError(
+            f"GitHub CLI (gh) version check timed out after {GIT_CMD_TIMEOUT}s"
+        ) from e
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise WorkspaceError(
             f"GitHub CLI (gh) is not available. Please install it: https://cli.github.com\n" f"Error: {e}"
@@ -237,7 +250,13 @@ def _setup_github_workspace(workspace: Path, owner: str, repo: str, pr_number: s
             check=True,
             capture_output=True,
             text=True,
+            timeout=CLONE_TIMEOUT,
         )
+    except subprocess.TimeoutExpired as e:
+        raise WorkspaceError(
+            f"Repository clone timed out after {CLONE_TIMEOUT // 60} minutes. "
+            f"The repository may be very large or there may be network issues."
+        ) from e
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr if hasattr(e, "stderr") and e.stderr else str(e)
         logger.error(f"gh repo clone failed: {error_msg}")
@@ -264,7 +283,12 @@ def _setup_github_workspace(workspace: Path, owner: str, repo: str, pr_number: s
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=CHECKOUT_TIMEOUT,
             )
+        except subprocess.TimeoutExpired as e:
+            raise WorkspaceError(
+                f"PR checkout timed out after {CHECKOUT_TIMEOUT}s"
+            ) from e
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr if hasattr(e, "stderr") and e.stderr else str(e)
             logger.error(f"gh pr checkout failed: {error_msg}")
@@ -283,6 +307,7 @@ def _setup_github_workspace(workspace: Path, owner: str, repo: str, pr_number: s
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=GIT_CMD_TIMEOUT,
             )
             import json
 
@@ -331,7 +356,12 @@ def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: s
             check=True,
             capture_output=True,
             text=True,
+            timeout=GIT_CMD_TIMEOUT,
         )
+    except subprocess.TimeoutExpired as e:
+        raise WorkspaceError(
+            f"GitLab CLI (glab) version check timed out after {GIT_CMD_TIMEOUT}s"
+        ) from e
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise WorkspaceError(
             f"GitLab CLI (glab) is not available. Please install it: https://gitlab.com/gitlab-org/cli\n" f"Error: {e}"
@@ -352,12 +382,19 @@ def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: s
     # Use HTTPS clone URL for consistency
     clone_url = f"https://{gitlab_host}/{owner}/{repo}.git"
 
-    subprocess.run(
-        ["git", "clone", clone_url, str(workspace)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "clone", clone_url, str(workspace)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=CLONE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise WorkspaceError(
+            f"Repository clone timed out after {CLONE_TIMEOUT // 60} minutes. "
+            f"The repository may be very large or there may be network issues."
+        ) from e
 
     # Change to workspace directory
     original_dir = Path.cwd()
@@ -401,8 +438,11 @@ def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: s
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=FETCH_TIMEOUT,
             )
             logger.debug(f"Git fetch completed: {fetch_result.stdout[:100]}")
+        except subprocess.TimeoutExpired as e:
+            logger.warning(f"Git fetch timed out after {FETCH_TIMEOUT}s (continuing anyway)")
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr if hasattr(e, "stderr") and e.stderr else str(e)
             logger.warning(f"Git fetch had issues (continuing anyway): {error_msg}")
@@ -415,8 +455,13 @@ def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: s
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=CHECKOUT_TIMEOUT,
             )
             logger.info(f"Successfully checked out MR branch: {source_branch}")
+        except subprocess.TimeoutExpired as e1:
+            raise WorkspaceError(
+                f"Git checkout timed out after {CHECKOUT_TIMEOUT}s"
+            ) from e1
         except subprocess.CalledProcessError as e1:
             # If that fails, try checking out the branch directly
             logger.debug(
@@ -428,8 +473,13 @@ def _setup_gitlab_workspace(workspace: Path, owner: str, repo: str, pr_number: s
                     check=True,
                     capture_output=True,
                     text=True,
+                    timeout=CHECKOUT_TIMEOUT,
                 )
                 logger.info(f"Checked out existing branch: {source_branch}")
+            except subprocess.TimeoutExpired as e2:
+                raise WorkspaceError(
+                    f"Git checkout timed out after {CHECKOUT_TIMEOUT}s"
+                ) from e2
             except subprocess.CalledProcessError as e2:
                 error_msg = e2.stderr if hasattr(e2, "stderr") and e2.stderr else str(e2)
                 logger.error(f"Failed to checkout branch {source_branch}: {error_msg}")

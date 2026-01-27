@@ -4,19 +4,31 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 from typing import Any
 
+from .retry import retry_network, is_rate_limit_error
 
 logger = logging.getLogger(__name__)
+
+# Timeout for GitHub CLI commands (seconds)
+GH_CMD_TIMEOUT = 60
 
 
 class GitHubAPIError(RuntimeError):
     """Raised when gh fails or returns invalid data."""
 
 
-def _run_gh_json_command(args: list[str], *, env: dict[str, str] | None = None) -> dict[str, Any]:
+class GitHubRateLimitError(GitHubAPIError):
+    """Raised when GitHub rate limits are hit."""
+
+
+def _run_gh_json_command(
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        timeout: int = GH_CMD_TIMEOUT,
+) -> dict[str, Any]:
     try:
         result = subprocess.run(
             args,
@@ -24,9 +36,15 @@ def _run_gh_json_command(args: list[str], *, env: dict[str, str] | None = None) 
             capture_output=True,
             text=True,
             env=env,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitHubAPIError(f"GitHub CLI command timed out after {timeout}s: {' '.join(args)}") from exc
     except subprocess.CalledProcessError as exc:  # pragma: no cover - passthrough path
         error_msg = exc.stderr if getattr(exc, "stderr", None) else str(exc)
+        # Check for rate limiting
+        if is_rate_limit_error(Exception(error_msg)):
+            raise GitHubRateLimitError(f"GitHub rate limit exceeded: {error_msg}") from exc
         raise GitHubAPIError(error_msg) from exc
 
     output = result.stdout.strip()
@@ -36,11 +54,26 @@ def _run_gh_json_command(args: list[str], *, env: dict[str, str] | None = None) 
         raise GitHubAPIError(f"Unable to parse gh JSON output: {exc}") from exc
 
 
+@retry_network()
 def fetch_github_pr_info(
-    owner: str,
-    repo: str,
-    pr_number: str | int,
+        owner: str,
+        repo: str,
+        pr_number: str | int,
 ) -> dict[str, Any]:
+    """Fetch GitHub PR information using gh CLI.
+
+    Args:
+        owner: Repository owner
+        repo: Repository name
+        pr_number: Pull request number
+
+    Returns:
+        Dictionary with PR metadata
+
+    Raises:
+        GitHubAPIError: If the API call fails
+        GitHubRateLimitError: If rate limits are exceeded
+    """
     fields = [
         "number",
         "title",
@@ -92,7 +125,7 @@ def normalize_github_metadata(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _github_comments_to_notes(
-    comments: dict[str, Any] | list[dict[str, Any]] | None,
+        comments: dict[str, Any] | list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     if not comments:
         return []

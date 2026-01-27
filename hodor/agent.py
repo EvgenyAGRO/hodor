@@ -2,7 +2,9 @@
 
 import logging
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -24,6 +26,7 @@ from .gitlab import (
     get_merge_request_discussions,
 )
 from .llm import create_hodor_agent
+from .metrics import MetricsCollector, check_memory_usage
 from .prompts.pr_review_prompt import build_pr_review_prompt
 from .review_parser import parse_review_output
 from .skills import discover_skills
@@ -36,6 +39,83 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Default timeout for review (30 minutes)
+DEFAULT_REVIEW_TIMEOUT = 1800
+
+
+class ReviewTimeoutError(Exception):
+    """Raised when a review operation times out."""
+    pass
+
+
+class TimeoutHandler:
+    """Context manager for signal-based timeout on Unix systems.
+
+    LIMITATIONS:
+    - Only works on Unix/Linux/macOS (not Windows)
+    - Only works on the main thread
+    - Uses SIGALRM which can interrupt at arbitrary points
+
+    On Windows or non-main threads, the timeout is silently skipped
+    and a warning is logged.
+    """
+
+    def __init__(self, timeout_seconds: int, message: str = "Operation timed out"):
+        self.timeout_seconds = timeout_seconds
+        self.message = message
+        self._old_handler = None
+        self._timeout_active = False
+
+    def _timeout_handler(self, signum: int, frame: Any) -> None:
+        raise ReviewTimeoutError(f"{self.message} after {self.timeout_seconds}s")
+
+    def __enter__(self) -> "TimeoutHandler":
+        if self.timeout_seconds > 0:
+            # Check for Windows - signal.SIGALRM doesn't exist on Windows
+            import sys
+            if sys.platform == "win32":
+                logger.warning(
+                    "Signal-based timeout not supported on Windows. "
+                    "Review may run without timeout protection."
+                )
+                return self
+
+            # Only set signal handler on main thread
+            try:
+                self._old_handler = signal.signal(signal.SIGALRM, self._timeout_handler)
+                signal.alarm(self.timeout_seconds)
+                self._timeout_active = True
+            except ValueError:
+                # Not on main thread, skip signal-based timeout
+                logger.warning(
+                    "Cannot set timeout (not on main thread). "
+                    "Review may run without timeout protection."
+                )
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self._timeout_active and self._old_handler is not None:
+            signal.alarm(0)  # Cancel the alarm
+            signal.signal(signal.SIGALRM, self._old_handler)
+            self._timeout_active = False
+
+# Threshold for detecting stuck pattern: consecutive empty MessageActions
+STUCK_PATTERN_THRESHOLD = 3
+
+# Maximum number of nudge attempts before giving up
+MAX_NUDGE_ATTEMPTS = 2
+
+# Default nudge prompt to unstick the agent
+DEFAULT_NUDGE_PROMPT = """You appear to have paused without producing output. Please continue your code review.
+
+If your previous search commands returned no results, that's normal - the pattern may not exist in this codebase.
+Please proceed with your review by:
+1. Examining the actual changed files in the diff
+2. Looking for issues in the code that was modified
+3. When ready, output your final review in the required JSON format
+
+Remember: Your task is to review the code changes, not to find specific patterns. Focus on the diff and provide your findings."""
 
 Platform = Literal["github", "gitlab"]
 
@@ -328,6 +408,7 @@ def review_pr(
         max_diff_bytes: int = 200000,
         large_diff_action: str = "preview",
         fail_on_error: bool = False,
+        timeout: int = DEFAULT_REVIEW_TIMEOUT,
 ) -> str:
     """
     Review a pull request using OpenHands agent with bash tools.
@@ -345,13 +426,19 @@ def review_pr(
         workspace_dir: Directory to use for workspace (if None, creates temp dir). Reuses if same repo.
         output_format: Output format - "markdown" or "json" (default: "markdown")
         max_iterations: Maximum number of agent iterations (default: 500, use -1 for unlimited)
+        max_diff_lines: Maximum lines per file diff before trimming
+        max_diff_bytes: Maximum bytes per file diff before trimming
+        large_diff_action: Action for large diffs (skip, preview, sample, summarize)
+        fail_on_error: If True, raise exception on review failure instead of fallback
+        timeout: Maximum time in seconds for the review (default: 1800 = 30 minutes)
 
     Returns:
         Review text as string (format depends on output_format)
 
     Raises:
         ValueError: If URL is invalid
-        RuntimeError: If review fails
+        RuntimeError: If review fails and fail_on_error is True
+        ReviewTimeoutError: If review exceeds timeout
     """
     logger.info(f"Starting PR review for: {pr_url}")
 
@@ -488,13 +575,19 @@ def review_pr(
         if hasattr(event, "error") and event.error:
             logger.warning(f"⚠️  Error: {event.error}")
 
-    import time
-
     start_time = time.time()
     conversation = None  # Initialize for exception handler
 
+    # Initialize metrics collector
+    metrics = MetricsCollector(
+        pr_url=pr_url,
+        platform=platform,
+        model=model,
+    )
+
     try:
         logger.info("Creating OpenHands conversation...")
+        metrics.start_phase("conversation_setup")
         workspace_obj = LocalWorkspace(working_dir=str(workspace))
 
         iteration_limit = 1_000_000 if max_iterations == -1 else max_iterations
@@ -521,18 +614,30 @@ def review_pr(
             max_iteration_per_run=iteration_limit,
             secrets=secrets if secrets else None,
         )
+        metrics.end_phase("conversation_setup")
 
         logger.info("Sending prompt to agent...")
         conversation.send_message(prompt)
 
-        logger.info("Running agent review (this may take several minutes)...")
+        logger.info(f"Running agent review (timeout: {timeout}s)...")
+        metrics.start_phase("agent_run")
 
-        conversation.run()
+        # Check memory before starting
+        mem_mb, mem_warning = check_memory_usage()
+        if mem_warning:
+            logger.warning(f"Starting review with high memory usage: {mem_mb:.1f}MB")
 
-        logger.info("Extracting review from agent response...")
-        review_content = get_agent_final_response(conversation.state.events)
+        # Use nudge recovery to handle stuck patterns, with timeout
+        with TimeoutHandler(timeout, "Review timed out"):
+            review_content = run_with_nudge_recovery(conversation)
+
+        metrics.end_phase("agent_run")
 
         if not review_content:
+            # Nudge recovery failed - raise error for fallback handling
+            is_stuck, empty_count = detect_stuck_pattern(conversation.state.events)
+            if is_stuck:
+                raise RuntimeError(f"Stuck pattern detected: {empty_count} consecutive empty responses (nudge recovery failed)")
             raise RuntimeError("Agent did not produce any review content")
 
         # Calculate review time
@@ -559,6 +664,16 @@ def review_pr(
 
                     # Cost estimate
                     cost = combined.accumulated_cost or 0
+
+                    # Record to metrics collector
+                    metrics.record_token_usage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_tokens=cache_write_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                    )
+                    metrics.record_cost(cost)
 
                     # Calculate cache hit rate
                     cache_hit_rate = 0
@@ -591,7 +706,29 @@ def review_pr(
             except Exception as e:
                 logger.warning(f"Failed to get metrics: {e}")
 
+        # Record success and finalize metrics
+        metrics.record_success()
+        final_metrics = metrics.finalize()
+        logger.info(f"Review metrics: {final_metrics.to_dict()}")
+
         return review_content
+
+    except ReviewTimeoutError as e:
+        # Handle timeout specifically
+        logger.error(f"Review timed out: {e}")
+        metrics.record_error(str(e), fallback_used=True)
+        metrics.finalize()
+
+        if fail_on_error:
+            raise
+
+        logger.warning("Fail-soft: generating fallback review due to timeout")
+        diff_stats = []
+        if workspace and diff_base_sha:
+            from .diff_utils import get_diff_stats
+            diff_stats = get_diff_stats(workspace, diff_base_sha, "HEAD")
+
+        return _generate_fallback_review(diff_stats, output_format, str(e))
 
     except Exception as e:
         logger.error(f"Review failed: {e}")
@@ -605,9 +742,15 @@ def review_pr(
                     recovered_content = _recover_last_json_response(conversation.state.events)
                     if recovered_content:
                         logger.info(f"Recovered {len(recovered_content)} chars from history")
+                        metrics.record_success()  # Partial success
+                        metrics.finalize()
                         return recovered_content
                 except Exception as recovery_error:
                     logger.warning(f"Failed to recover partial review: {recovery_error}")
+
+        # Record error in metrics
+        metrics.record_error(str(e), fallback_used=not fail_on_error)
+        metrics.finalize()
 
         if fail_on_error:
             raise RuntimeError(f"Review failed: {e}") from e
@@ -703,3 +846,161 @@ def _generate_fallback_review(diff_stats: list[Any], output_format: str, error_m
         lines.append(f"### Summary\n{summary}\n")
         lines.append(f"### Overall Verdict\n**Status**: Patch is correct\n\n**Explanation**: {summary}")
         return "\n".join(lines)
+
+
+def detect_stuck_pattern(events: list[Any]) -> tuple[bool, int]:
+    """
+    Detect if the agent is stuck producing consecutive empty responses.
+
+    This function scans the event history to detect a "stuck pattern" where
+    the LLM produces multiple consecutive empty MessageActions. This typically
+    happens when the agent gets confused (e.g., after grep commands return no results).
+
+    Args:
+        events: List of conversation events from OpenHands SDK
+
+    Returns:
+        Tuple of (is_stuck: bool, consecutive_empty_count: int)
+        - is_stuck is True if consecutive empty responses >= STUCK_PATTERN_THRESHOLD
+        - consecutive_empty_count is the number of consecutive empty responses at the end
+    """
+    if not events:
+        return False, 0
+
+    consecutive_empty = 0
+
+    # Scan events from the end to find consecutive empty MessageActions
+    for event in reversed(events):
+        action = getattr(event, "action", None)
+        if not action:
+            continue
+
+        # Only count MessageActions (not bash commands, file reads, etc.)
+        if action.__class__.__name__ != "MessageAction":
+            # Non-message action breaks the streak
+            break
+
+        content = getattr(action, "content", None)
+
+        # Check if content is empty or whitespace-only
+        if content is None or (isinstance(content, str) and not content.strip()):
+            consecutive_empty += 1
+        else:
+            # Non-empty message breaks the streak
+            break
+
+    is_stuck = consecutive_empty >= STUCK_PATTERN_THRESHOLD
+    return is_stuck, consecutive_empty
+
+
+def get_nudge_prompt(recent_events: list[Any] | None = None) -> str:
+    """
+    Generate a context-aware nudge prompt to unstick the agent.
+
+    Analyzes recent events to provide relevant guidance. For example,
+    if the agent was stuck after grep commands returned empty, the nudge
+    will mention that no results is normal and to continue the review.
+
+    Args:
+        recent_events: Optional list of recent events for context
+
+    Returns:
+        A nudge prompt string to send to the agent
+    """
+    if not recent_events:
+        return DEFAULT_NUDGE_PROMPT
+
+    # Check if recent events include failed search commands
+    has_failed_search = False
+    for event in reversed(recent_events[-10:]):  # Check last 10 events
+        action = getattr(event, "action", None)
+        if action and action.__class__.__name__ == "ExecuteBashAction":
+            command = getattr(action, "command", "")
+            # Check if it's a search command
+            if any(cmd in command.lower() for cmd in ["grep", "find", "rg", "ag", "git grep"]):
+                # Check if it failed (exit code 1 typically means no matches)
+                observation = getattr(event, "observation", None)
+                if observation:
+                    exit_code = getattr(observation, "exit_code", None)
+                    if exit_code == 1:
+                        has_failed_search = True
+                        break
+
+    if has_failed_search:
+        return """Your search command returned no results, which is completely normal - the pattern may not exist in this codebase.
+
+Please continue your code review by:
+1. Focusing on the actual changed files shown in the diff
+2. Analyzing the code modifications for potential issues
+3. Looking for bugs, security issues, or code quality problems
+
+When you've completed your analysis, output your final review in the required JSON format with your findings."""
+
+    return DEFAULT_NUDGE_PROMPT
+
+
+def run_with_nudge_recovery(
+    conversation: Any,
+    max_nudges: int = MAX_NUDGE_ATTEMPTS,
+) -> str | None:
+    """
+    Run the conversation with automatic nudge recovery for stuck patterns.
+
+    If the agent gets stuck producing empty responses, this function will
+    inject a nudge prompt and resume the conversation. It will attempt
+    up to max_nudges times before giving up.
+
+    Args:
+        conversation: OpenHands Conversation object
+        max_nudges: Maximum number of nudge attempts (default: MAX_NUDGE_ATTEMPTS)
+
+    Returns:
+        The review content if successful, or None if recovery failed.
+        May also return partial content recovered from conversation history.
+    """
+    # Use module-level import for testability
+    nudge_count = 0
+
+    while nudge_count <= max_nudges:
+        # Run the conversation
+        conversation.run()
+
+        # Check for review content
+        review_content = get_agent_final_response(conversation.state.events)
+
+        if review_content:
+            if nudge_count > 0:
+                logger.info(f"Successfully recovered after {nudge_count} nudge(s)")
+            return review_content
+
+        # Check if stuck
+        is_stuck, empty_count = detect_stuck_pattern(conversation.state.events)
+
+        if not is_stuck:
+            # Not stuck but no content - might be other issue
+            logger.warning("No review content produced but agent not stuck")
+            break
+
+        # We're stuck - try to nudge
+        if nudge_count < max_nudges:
+            nudge_count += 1
+            nudge_prompt = get_nudge_prompt(conversation.state.events)
+            logger.info(
+                f"Stuck pattern detected ({empty_count} empty responses). "
+                f"Sending nudge {nudge_count}/{max_nudges}..."
+            )
+            conversation.send_message(nudge_prompt)
+        else:
+            logger.warning(
+                f"Stuck pattern persists after {max_nudges} nudge(s). "
+                "Attempting to recover partial content..."
+            )
+            break
+
+    # Try to recover partial content from conversation history
+    partial_content = _recover_last_json_response(conversation.state.events)
+    if partial_content:
+        logger.info(f"Recovered partial content ({len(partial_content)} chars)")
+        return partial_content
+
+    return None

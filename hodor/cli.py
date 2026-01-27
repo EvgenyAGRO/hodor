@@ -1,6 +1,5 @@
 """Command-line interface for Hodor PR Review Agent."""
 
-import logging
 import os
 import sys
 from pathlib import Path
@@ -11,7 +10,9 @@ from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import _tty as _terminal_safety  # noqa: F401
-from .agent import detect_platform, post_review_comment, review_pr
+from .agent import detect_platform, post_review_comment, review_pr, DEFAULT_REVIEW_TIMEOUT
+from .health import run_health_checks
+from .logging_config import setup_logging
 
 console = Console()
 
@@ -139,6 +140,28 @@ def parse_llm_args(ctx, param, value):
     is_flag=True,
     help="Enable maximum reasoning effort with extended thinking budget (shortcut for --reasoning-effort high)",
 )
+@click.option(
+    "--timeout",
+    default=DEFAULT_REVIEW_TIMEOUT,
+    type=int,
+    help=f"Maximum time in seconds for the review (default: {DEFAULT_REVIEW_TIMEOUT} = 30 minutes)",
+)
+@click.option(
+    "--json-logs",
+    is_flag=True,
+    help="Output logs in JSON format for log aggregation systems",
+)
+@click.option(
+    "--log-file",
+    default=None,
+    type=click.Path(),
+    help="Path to write log file (in addition to console output)",
+)
+@click.option(
+    "--skip-health-checks",
+    is_flag=True,
+    help="Skip pre-flight health checks (not recommended)",
+)
 def main(
         pr_url: str,
         model: str,
@@ -157,6 +180,10 @@ def main(
         large_diff_action: str,
         fail_on_review_error: bool,
         ultrathink: bool,
+        timeout: int,
+        json_logs: bool,
+        log_file: str | None,
+        skip_health_checks: bool,
 ):
     """
     Review a GitHub pull request or GitLab merge request using AI.
@@ -199,14 +226,30 @@ def main(
         - GitHub: gh auth login  or set GITHUB_TOKEN
         - GitLab: provide a token with api scope via GITLAB_TOKEN (or CI_JOB_TOKEN in CI)
     """
-    # Configure logging
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    else:
-        logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    # Configure structured logging
+    log_path = Path(log_file) if log_file else None
+    setup_logging(
+        json_logs=json_logs,
+        log_file=log_path,
+        verbose=verbose,
+        context={"pr_url": pr_url, "model": model},
+    )
 
     # Check platform and token availability
     platform = detect_platform(pr_url)
+
+    # Run health checks unless skipped
+    if not skip_health_checks:
+        health_report = run_health_checks(platform=platform)
+        if not health_report.all_passed:
+            console.print("\n[bold red]Health Check Failed[/bold red]")
+            for check in health_report.failed_checks:
+                console.print(f"  [red]✗[/red] {check.name}: {check.message}")
+            console.print("\n[dim]Use --skip-health-checks to bypass (not recommended)[/dim]\n")
+            sys.exit(1)
+        # Show warnings for non-critical failures
+        for warning in health_report.warnings:
+            console.print(f"[yellow]⚠️  {warning.name}: {warning.message}[/yellow]")
     github_token = os.getenv("GITHUB_TOKEN")
     gitlab_token = os.getenv("GITLAB_TOKEN") or os.getenv("GITLAB_PRIVATE_TOKEN") or os.getenv("CI_JOB_TOKEN")
 
@@ -272,6 +315,7 @@ def main(
                 max_diff_bytes=max_file_diff_bytes,
                 large_diff_action=large_diff_action,
                 fail_on_error=fail_on_review_error,
+                timeout=timeout,
             )
 
             progress.update(task, description="Review complete!")
