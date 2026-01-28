@@ -10,7 +10,15 @@ just check       # Format (black) + lint (ruff) + typecheck (mypy)
 just test        # Run pytest
 just test-cov    # Run pytest with coverage report
 just fix         # Auto-fix formatting and linting issues
+just pre-commit  # Run fix + check + test (use before committing)
+just clean       # Remove build artifacts and caches
 just review URL  # Run hodor review on a PR URL
+```
+
+**Run locally:**
+```bash
+uv run hodor https://github.com/owner/repo/pull/123
+uv run hodor <URL> --post --verbose  # Post review and show agent actions
 ```
 
 **Run a single test file:**
@@ -25,6 +33,10 @@ Note: The `-c /dev/null` flag avoids pytest config issues with coverage options 
 just docker-build     # Build local image
 just docker-run URL   # Run review in container
 ```
+
+**Environment variables (store in `.env`):**
+- `LLM_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` - LLM provider authentication
+- `GITHUB_TOKEN` / `GITLAB_TOKEN` - For posting reviews (with `--post` flag)
 
 ## Architecture Overview
 
@@ -46,7 +58,7 @@ CLI (cli.py) → review_pr (agent.py) → OpenHands Conversation → Post Result
 
 | Module | Purpose |
 |--------|---------|
-| `agent.py` | Main review loop, fail-soft fallback, result extraction |
+| `agent.py` | Main review loop, fail-soft fallback, result extraction, nudge recovery |
 | `workspace.py` | Repo cloning, CI detection (GitLab CI, GitHub Actions) |
 | `llm/openhands_client.py` | OpenHands SDK configuration, model setup |
 | `prompts/pr_review_prompt.py` | Review prompt templates with variable interpolation |
@@ -54,7 +66,9 @@ CLI (cli.py) → review_pr (agent.py) → OpenHands Conversation → Post Result
 | `duplicate_detector.py` | Fuzzy matching to prevent duplicate comments |
 | `diff_utils.py` | Large diff trimming (preview/sample/summarize/skip) |
 | `gitlab.py` / `github.py` | Platform API interactions |
-| `skills.py` | Discovers `.hodor/skills/` for repo-specific guidelines |
+| `skills.py` | Discovers `.cursorrules`, `agents.md`, `.hodor/skills/` for repo-specific guidelines |
+| `retry.py` | Tenacity-based retry decorator with exponential backoff |
+| `metrics.py` | Token usage, cost tracking, and memory monitoring |
 
 ### OpenHands SDK Integration
 
@@ -77,6 +91,22 @@ On agent failure, Hodor generates a fallback review rather than failing CI:
 - Text normalization (case, whitespace, markdown stripping)
 - Fuzzy title matching (70% similarity threshold via SequenceMatcher)
 - Line proximity (within 5 lines = same location)
+
+### Stuck Pattern Recovery & Retry-on-Stuck
+
+When the agent gets stuck (consecutive empty responses), `agent.py` implements multi-level recovery:
+
+**Level 1 - Nudge Recovery** (within a single attempt):
+- `detect_stuck_pattern()`: Identifies when agent produces 3+ consecutive empty MessageActions
+- `run_with_nudge_recovery()`: Sends nudge prompts (up to 2 attempts) to unstick the agent
+- Raises `StuckPatternError` if nudge recovery fails
+
+**Level 2 - Retry from Scratch** (across attempts):
+- `--max-retries-when-stuck N` CLI flag (default: 1) controls retry behavior
+- On `StuckPatternError`, the entire review restarts from scratch (fresh workspace, agent, conversation)
+- After all retries exhausted, attempts to recover partial content via `_recover_last_json_response()`
+- If no meaningful content recovered: raises `RuntimeError` (CI job fails)
+- If partial content recovered: returns it as the review result
 
 ## Test Import Pattern
 

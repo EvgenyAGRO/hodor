@@ -49,6 +49,11 @@ class ReviewTimeoutError(Exception):
     pass
 
 
+class StuckPatternError(Exception):
+    """Raised when agent is stuck producing empty responses and nudge recovery failed."""
+    pass
+
+
 class TimeoutHandler:
     """Context manager for signal-based timeout on Unix systems.
 
@@ -409,6 +414,7 @@ def review_pr(
         large_diff_action: str = "preview",
         fail_on_error: bool = False,
         timeout: int = DEFAULT_REVIEW_TIMEOUT,
+        max_retries_when_stuck: int = 1,
 ) -> str:
     """
     Review a pull request using OpenHands agent with bash tools.
@@ -431,18 +437,20 @@ def review_pr(
         large_diff_action: Action for large diffs (skip, preview, sample, summarize)
         fail_on_error: If True, raise exception on review failure instead of fallback
         timeout: Maximum time in seconds for the review (default: 1800 = 30 minutes)
+        max_retries_when_stuck: Maximum retries when stuck pattern detected (default: 1, 0 to disable)
 
     Returns:
         Review text as string (format depends on output_format)
 
     Raises:
         ValueError: If URL is invalid
-        RuntimeError: If review fails and fail_on_error is True
+        RuntimeError: If review fails and fail_on_error is True, or if no meaningful content after retries
         ReviewTimeoutError: If review exceeds timeout
+        StuckPatternError: If stuck pattern persists after all retries (only if fail_on_error is True)
     """
     logger.info(f"Starting PR review for: {pr_url}")
 
-    # Parse PR URL
+    # Parse PR URL (done once, outside retry loop)
     try:
         owner, repo, pr_number, host = parse_pr_url(pr_url)
         platform = detect_platform(pr_url)
@@ -452,94 +460,20 @@ def review_pr(
 
     logger.info(f"Platform: {platform}, Repo: {owner}/{repo}, PR: {pr_number}, Host: {host}")
 
-    # Setup workspace (clone repo and checkout PR branch)
-    workspace = None
-    target_branch = "main"  # Default fallback
-    diff_base_sha = None  # GitLab CI provides this for deterministic diffs
-    try:
-        workspace, target_branch, diff_base_sha = setup_workspace(
-            platform=platform,
-            owner=owner,
-            repo=repo,
-            pr_number=str(pr_number),
-            host=host,
-            working_dir=workspace_dir,
-            reuse=workspace_dir is not None,  # Only reuse if user specified a workspace dir
-        )
-        logger.info(
-            f"Workspace ready: {workspace} (target branch: {target_branch}, "
-            f"diff_base_sha: {diff_base_sha[:8] if diff_base_sha else 'N/A'})"
-        )
-    except Exception as e:
-        logger.error(f"Failed to setup workspace: {e}")
-        raise RuntimeError(f"Failed to setup workspace: {e}") from e
+    # Initialize metrics collector (tracks across retries)
+    metrics = MetricsCollector(
+        pr_url=pr_url,
+        platform=platform,
+        model=model,
+    )
 
-    # Discover repository skills (from .cursorrules, agents.md, .hodor/skills/)
-    skills = []
-    try:
-        skills = discover_skills(workspace)
-        if skills:
-            logger.info(f"Discovered {len(skills)} repository skill(s)")
-        else:
-            logger.debug("No repository skills found")
-    except Exception as e:
-        logger.warning(f"Failed to discover skills (continuing without skills): {e}")
+    # Track state for recovery after all retries exhausted
+    last_conversation = None
+    last_workspace = None
+    last_diff_base_sha = None
+    last_error = None
 
-    # Create OpenHands agent with repository skills
-    try:
-        agent = create_hodor_agent(
-            model=model,
-            temperature=temperature,
-            reasoning_effort=reasoning_effort,
-            verbose=verbose,
-            llm_overrides=user_llm_params,
-            skills=skills,
-        )
-    except Exception as e:
-        logger.error(f"Failed to create OpenHands agent: {e}")
-        if workspace and cleanup:
-            cleanup_workspace(workspace)
-        raise RuntimeError(f"Failed to create agent: {e}") from e
-
-    mr_metadata = None
-    if platform == "gitlab":
-        try:
-            mr_metadata = fetch_gitlab_mr_info(owner, repo, pr_number, host, include_comments=True)
-        except GitLabAPIError as e:
-            logger.warning(f"Failed to fetch GitLab metadata: {e}")
-    elif platform == "github":
-        try:
-            github_raw = fetch_github_pr_info(owner, repo, pr_number)
-            mr_metadata = normalize_github_metadata(github_raw)
-        except GitHubAPIError as e:
-            logger.warning(f"Failed to fetch GitHub metadata: {e}")
-
-    # Build prompt
-    try:
-        prompt = build_pr_review_prompt(
-            pr_url=pr_url,
-            owner=owner,
-            repo=repo,
-            pr_number=str(pr_number),
-            platform=platform,
-            target_branch=target_branch,
-            diff_base_sha=diff_base_sha,
-            mr_metadata=mr_metadata,
-            custom_instructions=custom_prompt,
-            custom_prompt_file=prompt_file,
-            output_format=output_format,
-            workspace_path=workspace,
-            max_diff_lines=max_diff_lines,
-            max_diff_bytes=max_diff_bytes,
-            large_diff_action=large_diff_action,
-        )
-    except Exception as e:
-        logger.error(f"Failed to build prompt: {e}")
-        if workspace and cleanup:
-            cleanup_workspace(workspace)
-        raise RuntimeError(f"Failed to build prompt: {e}") from e
-
-    #  Event callback for monitoring agent progress
+    # Event callback for monitoring agent progress (defined once, used across retries)
     def on_event(event: Any) -> None:
         """Callback for streaming agent events in verbose mode."""
         if not verbose:
@@ -576,203 +510,331 @@ def review_pr(
             logger.warning(f"⚠️  Error: {event.error}")
 
     start_time = time.time()
-    conversation = None  # Initialize for exception handler
 
-    # Initialize metrics collector
-    metrics = MetricsCollector(
-        pr_url=pr_url,
-        platform=platform,
-        model=model,
-    )
+    # Retry loop for stuck pattern recovery
+    total_attempts = max_retries_when_stuck + 1
+    for attempt in range(total_attempts):
+        is_last_attempt = (attempt == max_retries_when_stuck)
 
-    try:
-        logger.info("Creating OpenHands conversation...")
-        metrics.start_phase("conversation_setup")
-        workspace_obj = LocalWorkspace(working_dir=str(workspace))
+        if attempt > 0:
+            logger.info(f"🔄 Retry attempt {attempt}/{max_retries_when_stuck} after stuck pattern...")
+            # Clean up previous attempt's workspace before retrying
+            if last_workspace and cleanup:
+                logger.info("Cleaning up previous attempt's workspace...")
+                cleanup_workspace(last_workspace)
+                last_workspace = None
 
-        iteration_limit = 1_000_000 if max_iterations == -1 else max_iterations
+        # Setup workspace (clone repo and checkout PR branch)
+        workspace = None
+        target_branch = "main"  # Default fallback
+        diff_base_sha = None  # GitLab CI provides this for deterministic diffs
+        try:
+            workspace, target_branch, diff_base_sha = setup_workspace(
+                platform=platform,
+                owner=owner,
+                repo=repo,
+                pr_number=str(pr_number),
+                host=host,
+                working_dir=workspace_dir,
+                reuse=workspace_dir is not None,  # Only reuse if user specified a workspace dir
+            )
+            logger.info(
+                f"Workspace ready: {workspace} (target branch: {target_branch}, "
+                f"diff_base_sha: {diff_base_sha[:8] if diff_base_sha else 'N/A'})"
+            )
+            last_workspace = workspace
+            last_diff_base_sha = diff_base_sha
+        except Exception as e:
+            logger.error(f"Failed to setup workspace: {e}")
+            raise RuntimeError(f"Failed to setup workspace: {e}") from e
 
-        # Collect secrets to mask in agent output (prevents accidental exposure)
-        secrets: dict[str, str] = {}
-        for env_var in [
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "LLM_API_KEY",
-            "GITHUB_TOKEN",
-            "GITLAB_TOKEN",
-            "GITLAB_PRIVATE_TOKEN",
-            "CI_JOB_TOKEN",
-        ]:
-            val = os.getenv(env_var)
-            if val:
-                secrets[env_var] = val
+        # Discover repository skills (from .cursorrules, agents.md, .hodor/skills/)
+        skills = []
+        try:
+            skills = discover_skills(workspace)
+            if skills:
+                logger.info(f"Discovered {len(skills)} repository skill(s)")
+            else:
+                logger.debug("No repository skills found")
+        except Exception as e:
+            logger.warning(f"Failed to discover skills (continuing without skills): {e}")
 
-        conversation = Conversation(
-            agent=agent,
-            workspace=workspace_obj,
-            callbacks=[on_event] if verbose else None,
-            max_iteration_per_run=iteration_limit,
-            secrets=secrets if secrets else None,
-        )
-        metrics.end_phase("conversation_setup")
+        # Create OpenHands agent with repository skills
+        try:
+            agent = create_hodor_agent(
+                model=model,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                verbose=verbose,
+                llm_overrides=user_llm_params,
+                skills=skills,
+            )
+        except Exception as e:
+            logger.error(f"Failed to create OpenHands agent: {e}")
+            if workspace and cleanup:
+                cleanup_workspace(workspace)
+            raise RuntimeError(f"Failed to create agent: {e}") from e
 
-        logger.info("Sending prompt to agent...")
-        conversation.send_message(prompt)
-
-        logger.info(f"Running agent review (timeout: {timeout}s)...")
-        metrics.start_phase("agent_run")
-
-        # Check memory before starting
-        mem_mb, mem_warning = check_memory_usage()
-        if mem_warning:
-            logger.warning(f"Starting review with high memory usage: {mem_mb:.1f}MB")
-
-        # Use nudge recovery to handle stuck patterns, with timeout
-        with TimeoutHandler(timeout, "Review timed out"):
-            review_content = run_with_nudge_recovery(conversation)
-
-        metrics.end_phase("agent_run")
-
-        if not review_content:
-            # Nudge recovery failed - raise error for fallback handling
-            is_stuck, empty_count = detect_stuck_pattern(conversation.state.events)
-            if is_stuck:
-                raise RuntimeError(f"Stuck pattern detected: {empty_count} consecutive empty responses (nudge recovery failed)")
-            raise RuntimeError("Agent did not produce any review content")
-
-        # Calculate review time
-        review_time_seconds = time.time() - start_time
-        review_time_str = f"{int(review_time_seconds // 60)}m {int(review_time_seconds % 60)}s"
-
-        logger.info(f"Review complete ({len(review_content)} chars)")
-
-        # Always print metrics (not just in verbose mode)
-        # Access metrics via conversation.conversation_stats (SDK API)
-        if hasattr(conversation, "conversation_stats"):
+        mr_metadata = None
+        if platform == "gitlab":
             try:
-                combined = conversation.conversation_stats.get_combined_metrics()
+                mr_metadata = fetch_gitlab_mr_info(owner, repo, pr_number, host, include_comments=True)
+            except GitLabAPIError as e:
+                logger.warning(f"Failed to fetch GitLab metadata: {e}")
+        elif platform == "github":
+            try:
+                github_raw = fetch_github_pr_info(owner, repo, pr_number)
+                mr_metadata = normalize_github_metadata(github_raw)
+            except GitHubAPIError as e:
+                logger.warning(f"Failed to fetch GitHub metadata: {e}")
 
-                if combined and combined.accumulated_token_usage:
-                    # Token usage breakdown from Metrics object
-                    usage = combined.accumulated_token_usage
-                    prompt_tokens = usage.prompt_tokens or 0
-                    completion_tokens = usage.completion_tokens or 0
-                    cache_read_tokens = usage.cache_read_tokens or 0
-                    cache_write_tokens = usage.cache_write_tokens or 0
-                    reasoning_tokens = usage.reasoning_tokens or 0
-                    total_tokens = prompt_tokens + completion_tokens + cache_read_tokens + reasoning_tokens
+        # Build prompt
+        try:
+            prompt = build_pr_review_prompt(
+                pr_url=pr_url,
+                owner=owner,
+                repo=repo,
+                pr_number=str(pr_number),
+                platform=platform,
+                target_branch=target_branch,
+                diff_base_sha=diff_base_sha,
+                mr_metadata=mr_metadata,
+                custom_instructions=custom_prompt,
+                custom_prompt_file=prompt_file,
+                output_format=output_format,
+                workspace_path=workspace,
+                max_diff_lines=max_diff_lines,
+                max_diff_bytes=max_diff_bytes,
+                large_diff_action=large_diff_action,
+            )
+        except Exception as e:
+            logger.error(f"Failed to build prompt: {e}")
+            if workspace and cleanup:
+                cleanup_workspace(workspace)
+            raise RuntimeError(f"Failed to build prompt: {e}") from e
 
-                    # Cost estimate
-                    cost = combined.accumulated_cost or 0
+        conversation = None  # Initialize for exception handler
 
-                    # Record to metrics collector
-                    metrics.record_token_usage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        cache_read_tokens=cache_read_tokens,
-                        cache_write_tokens=cache_write_tokens,
-                        reasoning_tokens=reasoning_tokens,
-                    )
-                    metrics.record_cost(cost)
+        try:
+            logger.info("Creating OpenHands conversation...")
+            metrics.start_phase("conversation_setup")
+            workspace_obj = LocalWorkspace(working_dir=str(workspace))
 
-                    # Calculate cache hit rate
-                    cache_hit_rate = 0
-                    if cache_read_tokens > 0 and (prompt_tokens + cache_read_tokens) > 0:
-                        cache_hit_rate = (cache_read_tokens / (prompt_tokens + cache_read_tokens)) * 100
+            iteration_limit = 1_000_000 if max_iterations == -1 else max_iterations
 
-                    # Print metrics (always, not just verbose)
-                    print("\n" + "=" * 60)
-                    print("📊 Token Usage Metrics:")
-                    print(f"  • Input tokens:       {prompt_tokens:,}")
-                    print(f"  • Output tokens:      {completion_tokens:,}")
-                    if cache_read_tokens > 0:
-                        print(f"  • Cache hits:         {cache_read_tokens:,} ({cache_hit_rate:.1f}%)")
-                    if reasoning_tokens > 0:
-                        print(f"  • Reasoning tokens:   {reasoning_tokens:,}")
-                    print(f"  • Total tokens:       {total_tokens:,}")
-                    print(f"\n💰 Cost Estimate:      ${cost:.4f}")
-                    print(f"⏱️  Review Time:        {review_time_str}")
-                    print("=" * 60 + "\n")
+            # Collect secrets to mask in agent output (prevents accidental exposure)
+            secrets: dict[str, str] = {}
+            for env_var in [
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "LLM_API_KEY",
+                "GITHUB_TOKEN",
+                "GITLAB_TOKEN",
+                "GITLAB_PRIVATE_TOKEN",
+                "CI_JOB_TOKEN",
+            ]:
+                val = os.getenv(env_var)
+                if val:
+                    secrets[env_var] = val
 
-                    # Verbose mode: additional details
-                    if verbose:
-                        if cache_write_tokens > 0:
-                            logger.info(f"  • Cache writes:       {cache_write_tokens:,}")
-                        if combined.response_latencies:
-                            avg_latency = sum(lat.latency for lat in combined.response_latencies) / len(
-                                combined.response_latencies
-                            )
-                            logger.info(f"  • Avg API latency:    {avg_latency:.2f}s")
-            except Exception as e:
-                logger.warning(f"Failed to get metrics: {e}")
+            conversation = Conversation(
+                agent=agent,
+                workspace=workspace_obj,
+                callbacks=[on_event] if verbose else None,
+                max_iteration_per_run=iteration_limit,
+                secrets=secrets if secrets else None,
+            )
+            metrics.end_phase("conversation_setup")
 
-        # Record success and finalize metrics
-        metrics.record_success()
-        final_metrics = metrics.finalize()
-        logger.info(f"Review metrics: {final_metrics.to_dict()}")
+            logger.info("Sending prompt to agent...")
+            conversation.send_message(prompt)
 
-        return review_content
+            logger.info(f"Running agent review (timeout: {timeout}s)...")
+            metrics.start_phase("agent_run")
 
-    except ReviewTimeoutError as e:
-        # Handle timeout specifically
-        logger.error(f"Review timed out: {e}")
-        metrics.record_error(str(e), fallback_used=True)
+            # Check memory before starting
+            mem_mb, mem_warning = check_memory_usage()
+            if mem_warning:
+                logger.warning(f"Starting review with high memory usage: {mem_mb:.1f}MB")
+
+            # Use nudge recovery to handle stuck patterns, with timeout
+            # run_with_nudge_recovery raises StuckPatternError or RuntimeError on failure
+            with TimeoutHandler(timeout, "Review timed out"):
+                review_content = run_with_nudge_recovery(conversation)
+
+            metrics.end_phase("agent_run")
+
+            # Calculate review time
+            review_time_seconds = time.time() - start_time
+            review_time_str = f"{int(review_time_seconds // 60)}m {int(review_time_seconds % 60)}s"
+
+            logger.info(f"Review complete ({len(review_content)} chars)")
+
+            # Always print metrics (not just in verbose mode)
+            # Access metrics via conversation.conversation_stats (SDK API)
+            if hasattr(conversation, "conversation_stats"):
+                try:
+                    combined = conversation.conversation_stats.get_combined_metrics()
+
+                    if combined and combined.accumulated_token_usage:
+                        # Token usage breakdown from Metrics object
+                        usage = combined.accumulated_token_usage
+                        prompt_tokens = usage.prompt_tokens or 0
+                        completion_tokens = usage.completion_tokens or 0
+                        cache_read_tokens = usage.cache_read_tokens or 0
+                        cache_write_tokens = usage.cache_write_tokens or 0
+                        reasoning_tokens = usage.reasoning_tokens or 0
+                        total_tokens = prompt_tokens + completion_tokens + cache_read_tokens + reasoning_tokens
+
+                        # Cost estimate
+                        cost = combined.accumulated_cost or 0
+
+                        # Record to metrics collector
+                        metrics.record_token_usage(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            cache_read_tokens=cache_read_tokens,
+                            cache_write_tokens=cache_write_tokens,
+                            reasoning_tokens=reasoning_tokens,
+                        )
+                        metrics.record_cost(cost)
+
+                        # Calculate cache hit rate
+                        cache_hit_rate = 0
+                        if cache_read_tokens > 0 and (prompt_tokens + cache_read_tokens) > 0:
+                            cache_hit_rate = (cache_read_tokens / (prompt_tokens + cache_read_tokens)) * 100
+
+                        # Print metrics (always, not just verbose)
+                        print("\n" + "=" * 60)
+                        print("📊 Token Usage Metrics:")
+                        print(f"  • Input tokens:       {prompt_tokens:,}")
+                        print(f"  • Output tokens:      {completion_tokens:,}")
+                        if cache_read_tokens > 0:
+                            print(f"  • Cache hits:         {cache_read_tokens:,} ({cache_hit_rate:.1f}%)")
+                        if reasoning_tokens > 0:
+                            print(f"  • Reasoning tokens:   {reasoning_tokens:,}")
+                        print(f"  • Total tokens:       {total_tokens:,}")
+                        print(f"\n💰 Cost Estimate:      ${cost:.4f}")
+                        print(f"⏱️  Review Time:        {review_time_str}")
+                        print("=" * 60 + "\n")
+
+                        # Verbose mode: additional details
+                        if verbose:
+                            if cache_write_tokens > 0:
+                                logger.info(f"  • Cache writes:       {cache_write_tokens:,}")
+                            if combined.response_latencies:
+                                avg_latency = sum(lat.latency for lat in combined.response_latencies) / len(
+                                    combined.response_latencies
+                                )
+                                logger.info(f"  • Avg API latency:    {avg_latency:.2f}s")
+                except Exception as e:
+                    logger.warning(f"Failed to get metrics: {e}")
+
+            # Record success and finalize metrics
+            metrics.record_success()
+            final_metrics = metrics.finalize()
+            logger.info(f"Review metrics: {final_metrics.to_dict()}")
+
+            # Clean up workspace on success
+            if workspace and cleanup:
+                logger.info("Cleaning up workspace...")
+                cleanup_workspace(workspace)
+
+            # Reset terminal state
+            _terminal_safety.restore_terminal_state()
+
+            return review_content
+
+        except StuckPatternError as e:
+            # Save conversation for potential recovery after all retries exhausted
+            last_conversation = conversation
+            last_error = e
+
+            if not is_last_attempt:
+                logger.warning(f"Stuck pattern detected on attempt {attempt + 1}: {e}")
+                # Don't clean up here - cleanup happens at start of next iteration
+                continue
+            else:
+                logger.error(f"Stuck pattern persists after {total_attempts} attempt(s): {e}")
+                # Fall through to post-loop fallback handling
+                break
+
+        except ReviewTimeoutError as e:
+            # Don't retry on timeout - it's likely a systemic issue
+            logger.error(f"Review timed out: {e}")
+            last_error = e
+            last_conversation = conversation
+            break
+
+        except Exception as e:
+            # Don't retry on other errors (workspace setup, agent creation, etc.)
+            logger.error(f"Review failed: {e}")
+            last_error = e
+            last_conversation = conversation
+            break
+
+    # --- Post-loop: All retries exhausted or non-retryable error ---
+    # Reset terminal state
+    _terminal_safety.restore_terminal_state()
+
+    # Try to recover partial content from last conversation
+    recovered_content = None
+    if last_conversation is not None and hasattr(last_conversation, 'state'):
+        try:
+            logger.info("Attempting to recover partial review from conversation history...")
+            recovered_content = _recover_last_json_response(last_conversation.state.events)
+            if recovered_content:
+                logger.info(f"Recovered {len(recovered_content)} chars from history")
+        except Exception as recovery_error:
+            logger.warning(f"Failed to recover partial review: {recovery_error}")
+
+    # Clean up final workspace
+    if last_workspace and cleanup:
+        logger.info("Cleaning up workspace...")
+        cleanup_workspace(last_workspace)
+
+    # Handle based on whether we have meaningful content
+    if recovered_content:
+        # We have partial content - use it as fallback
+        metrics.record_success()  # Partial success
         metrics.finalize()
+        return recovered_content
 
+    # No meaningful content recovered
+    error_msg = str(last_error) if last_error else "Unknown error"
+
+    # For StuckPatternError with no content: always fail (per user requirement)
+    if isinstance(last_error, StuckPatternError):
+        metrics.record_error(error_msg, fallback_used=False)
+        metrics.finalize()
+        raise RuntimeError(
+            f"Review failed after {total_attempts} attempt(s) due to stuck pattern with no recoverable content: {error_msg}"
+        )
+
+    # For timeout: generate fallback if not fail_on_error
+    if isinstance(last_error, ReviewTimeoutError):
+        metrics.record_error(error_msg, fallback_used=not fail_on_error)
+        metrics.finalize()
         if fail_on_error:
-            raise
-
+            raise last_error
         logger.warning("Fail-soft: generating fallback review due to timeout")
         diff_stats = []
-        if workspace and diff_base_sha:
+        if last_workspace and last_diff_base_sha:
             from .diff_utils import get_diff_stats
-            diff_stats = get_diff_stats(workspace, diff_base_sha, "HEAD")
+            diff_stats = get_diff_stats(last_workspace, last_diff_base_sha, "HEAD")
+        return _generate_fallback_review(diff_stats, output_format, error_msg)
 
-        return _generate_fallback_review(diff_stats, output_format, str(e))
-
-    except Exception as e:
-        logger.error(f"Review failed: {e}")
-
-        # Try to recover partial review if agent crashed/got stuck
-        # Only attempt if conversation was created successfully
-        if "Agent did not produce any review content" in str(e) or "Stuck pattern detected" in str(e):
-            if conversation is not None and hasattr(conversation, 'state'):
-                try:
-                    logger.info("Attempting to recover partial review from conversation history...")
-                    recovered_content = _recover_last_json_response(conversation.state.events)
-                    if recovered_content:
-                        logger.info(f"Recovered {len(recovered_content)} chars from history")
-                        metrics.record_success()  # Partial success
-                        metrics.finalize()
-                        return recovered_content
-                except Exception as recovery_error:
-                    logger.warning(f"Failed to recover partial review: {recovery_error}")
-
-        # Record error in metrics
-        metrics.record_error(str(e), fallback_used=not fail_on_error)
-        metrics.finalize()
-
-        if fail_on_error:
-            raise RuntimeError(f"Review failed: {e}") from e
-
-        logger.warning(f"Fail-soft: generating fallback review due to error: {e}")
-        # Build diff stats for fallback if possible
-        diff_stats = []
-        if workspace and diff_base_sha:
-            from .diff_utils import get_diff_stats
-            diff_stats = get_diff_stats(workspace, diff_base_sha, "HEAD")
-
-        return _generate_fallback_review(diff_stats, output_format, str(e))
-
-
-    finally:
-        # Reset terminal by draining leftover control-sequence replies
-        _terminal_safety.restore_terminal_state()
-
-        # Clean up workspace
-        if workspace and cleanup:
-            logger.info("Cleaning up workspace...")
-            cleanup_workspace(workspace)
+    # For other errors: generate fallback if not fail_on_error
+    metrics.record_error(error_msg, fallback_used=not fail_on_error)
+    metrics.finalize()
+    if fail_on_error:
+        raise RuntimeError(f"Review failed: {error_msg}") from last_error
+    logger.warning(f"Fail-soft: generating fallback review due to error: {error_msg}")
+    diff_stats = []
+    if last_workspace and last_diff_base_sha:
+        from .diff_utils import get_diff_stats
+        diff_stats = get_diff_stats(last_workspace, last_diff_base_sha, "HEAD")
+    return _generate_fallback_review(diff_stats, output_format, error_msg)
 
 
 def _recover_last_json_response(events: list[Any]) -> str | None:
@@ -942,7 +1004,7 @@ When you've completed your analysis, output your final review in the required JS
 def run_with_nudge_recovery(
     conversation: Any,
     max_nudges: int = MAX_NUDGE_ATTEMPTS,
-) -> str | None:
+) -> Any | None:
     """
     Run the conversation with automatic nudge recovery for stuck patterns.
 
@@ -955,8 +1017,11 @@ def run_with_nudge_recovery(
         max_nudges: Maximum number of nudge attempts (default: MAX_NUDGE_ATTEMPTS)
 
     Returns:
-        The review content if successful, or None if recovery failed.
-        May also return partial content recovered from conversation history.
+        The review content if successful.
+
+    Raises:
+        StuckPatternError: If agent is stuck and nudge recovery failed.
+        RuntimeError: If no content produced but agent not stuck.
     """
     # Use module-level import for testability
     nudge_count = 0
@@ -979,7 +1044,7 @@ def run_with_nudge_recovery(
         if not is_stuck:
             # Not stuck but no content - might be other issue
             logger.warning("No review content produced but agent not stuck")
-            break
+            raise RuntimeError("Agent did not produce any review content")
 
         # We're stuck - try to nudge
         if nudge_count < max_nudges:
@@ -993,14 +1058,9 @@ def run_with_nudge_recovery(
         else:
             logger.warning(
                 f"Stuck pattern persists after {max_nudges} nudge(s). "
-                "Attempting to recover partial content..."
+                "Nudge recovery failed."
             )
-            break
-
-    # Try to recover partial content from conversation history
-    partial_content = _recover_last_json_response(conversation.state.events)
-    if partial_content:
-        logger.info(f"Recovered partial content ({len(partial_content)} chars)")
-        return partial_content
-
+            raise StuckPatternError(
+                f"Agent stuck with {empty_count} consecutive empty responses after {max_nudges} nudge attempts"
+            )
     return None

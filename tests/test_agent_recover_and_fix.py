@@ -459,7 +459,7 @@ def test_detect_stuck_pattern_mixed_with_bash_actions():
 @patch("hodor.agent.setup_workspace")
 @patch("hodor.agent.build_pr_review_prompt")
 @patch("hodor.agent.cleanup_workspace")
-def test_review_pr_detects_stuck_pattern_and_uses_fallback(
+def test_review_pr_stuck_pattern_with_no_content_raises(
         mock_cleanup,
         mock_build_prompt,
         mock_setup,
@@ -469,7 +469,7 @@ def test_review_pr_detects_stuck_pattern_and_uses_fallback(
         mock_detect_stuck,
         mock_get_response,
 ):
-    """Test that review_pr detects stuck pattern and generates fallback review."""
+    """Test that review_pr raises RuntimeError when stuck with no recoverable content."""
     from hodor.agent import review_pr
     from pathlib import Path
 
@@ -480,8 +480,8 @@ def test_review_pr_detects_stuck_pattern_and_uses_fallback(
 
     # Simulate stuck pattern: conversation runs but produces no content
     mock_conversation = MagicMock()
-    mock_conversation.state.events = []  # Events will be checked by detect_stuck_pattern
-    mock_conversation.run.return_value = None  # Run completes without error
+    mock_conversation.state.events = []  # No recoverable content
+    mock_conversation.run.return_value = None
     mock_conversation_class.return_value = mock_conversation
 
     # get_agent_final_response returns empty (no review produced)
@@ -490,21 +490,21 @@ def test_review_pr_detects_stuck_pattern_and_uses_fallback(
     # detect_stuck_pattern returns True (we're stuck)
     mock_detect_stuck.return_value = (True, 3)
 
-    # Provide diff stats for fallback
+    # Provide diff stats (but they won't be used since stuck pattern always fails)
     mock_get_diff_stats.return_value = [
         MagicMock(path="file.py", added=10, deleted=5)
     ]
 
-    # Should NOT raise, should return fallback
-    result = review_pr(
-        "https://gitlab.com/owner/repo/-/merge_requests/1",
-        fail_on_error=False,
-        output_format="json"
-    )
+    # Should raise RuntimeError when stuck with no content (new behavior per user requirement)
+    with pytest.raises(RuntimeError) as exc_info:
+        review_pr(
+            "https://gitlab.com/owner/repo/-/merge_requests/1",
+            fail_on_error=False,  # Even with fail_on_error=False, stuck with no content fails
+            output_format="json",
+            max_retries_when_stuck=0,  # Disable retries to test single attempt
+        )
 
-    assert result is not None
-    # Fallback review should mention the stuck pattern
-    assert "fallback" in result.lower() or "stuck" in result.lower() or "summary" in result.lower()
+    assert "stuck pattern" in str(exc_info.value).lower()
 
 
 @patch("hodor.agent.get_agent_final_response")
@@ -546,11 +546,14 @@ def test_review_pr_logs_stuck_pattern_detection(
     mock_get_diff_stats.return_value = []
 
     with caplog.at_level(logging.WARNING):
-        review_pr(
-            "https://gitlab.com/owner/repo/-/merge_requests/1",
-            fail_on_error=False,
-            output_format="json"
-        )
+        # This will raise RuntimeError since stuck with no content
+        with pytest.raises(RuntimeError):
+            review_pr(
+                "https://gitlab.com/owner/repo/-/merge_requests/1",
+                fail_on_error=False,
+                output_format="json",
+                max_retries_when_stuck=0,  # Disable retries for faster test
+            )
 
     # Should log about stuck pattern
     assert any("stuck" in record.message.lower() or "empty" in record.message.lower()
@@ -646,7 +649,9 @@ def test_run_with_nudge_recovery_nudges_on_stuck():
 
 
 def test_run_with_nudge_recovery_respects_max_attempts():
-    """Test that run_with_nudge_recovery stops after max nudge attempts."""
+    """Test that run_with_nudge_recovery raises StuckPatternError after max nudge attempts."""
+    from hodor.agent import StuckPatternError
+
     mock_conversation = MagicMock()
     mock_conversation.state.events = []
     mock_conversation.run.return_value = None
@@ -659,40 +664,36 @@ def test_run_with_nudge_recovery_respects_max_attempts():
             mock_get_response.return_value = ""
             mock_detect.return_value = (True, 3)
 
-            result = run_with_nudge_recovery(mock_conversation, max_nudges=2)
+            # Should raise StuckPatternError after exhausting nudges
+            with pytest.raises(StuckPatternError):
+                run_with_nudge_recovery(mock_conversation, max_nudges=2)
 
-    # Should return None after exhausting nudges
-    assert result is None
     # Should call run() 3 times (initial + 2 nudges)
     assert mock_conversation.run.call_count == 3
     # Should send 2 nudge messages
     assert mock_conversation.send_message.call_count == 2
 
 
-def test_run_with_nudge_recovery_extracts_partial_on_failure():
-    """Test that partial content is extracted when nudges fail."""
-    mock_conversation = MagicMock()
+def test_run_with_nudge_recovery_raises_stuck_error():
+    """Test that run_with_nudge_recovery raises StuckPatternError with correct message."""
+    from hodor.agent import StuckPatternError
 
-    # Create events with some partial JSON
-    event1 = MockEventBase()
-    event1.action = MockMessageAction("Looking at the code...")
-    event2 = MockEventBase()
-    event2.action = MockMessageAction('Partial: {"findings": [{"title": "Bug"}]}')
-    mock_conversation.state.events = [event1, event2]
+    mock_conversation = MagicMock()
+    mock_conversation.state.events = []
     mock_conversation.run.return_value = None
 
     import hodor.agent as agent_module
 
     with patch.object(agent_module, "get_agent_final_response") as mock_get_response:
         with patch.object(agent_module, "detect_stuck_pattern") as mock_detect:
-            mock_get_response.return_value = ""  # No final response
-            mock_detect.return_value = (True, 3)  # Always stuck
+            mock_get_response.return_value = ""
+            mock_detect.return_value = (True, 5)  # 5 consecutive empty responses
 
-            result = run_with_nudge_recovery(mock_conversation, max_nudges=1)
+            with pytest.raises(StuckPatternError) as exc_info:
+                run_with_nudge_recovery(mock_conversation, max_nudges=1)
 
-    # Should recover partial JSON from events
-    assert result is not None
-    assert '{"findings":' in result
+    # Error message should include details
+    assert "5 consecutive empty responses" in str(exc_info.value)
 
 
 def test_run_with_nudge_recovery_logs_nudge_attempts(caplog):

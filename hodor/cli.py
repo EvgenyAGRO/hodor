@@ -147,6 +147,12 @@ def parse_llm_args(ctx, param, value):
     help=f"Maximum time in seconds for the review (default: {DEFAULT_REVIEW_TIMEOUT} = 30 minutes)",
 )
 @click.option(
+    "--max-retries-when-stuck",
+    default=1,
+    type=int,
+    help="Maximum retries when agent gets stuck (default: 1, set to 0 to disable). Each retry starts fresh from scratch.",
+)
+@click.option(
     "--json-logs",
     is_flag=True,
     help="Output logs in JSON format for log aggregation systems",
@@ -181,6 +187,7 @@ def main(
         fail_on_review_error: bool,
         ultrathink: bool,
         timeout: int,
+        max_retries_when_stuck: int,
         json_logs: bool,
         log_file: str | None,
         skip_health_checks: bool,
@@ -285,6 +292,8 @@ def main(
         console.print(f"[dim]Max Iterations: Unlimited[/dim]")
     else:
         console.print(f"[dim]Max Iterations: {max_iterations}[/dim]")
+    if max_retries_when_stuck > 0:
+        console.print(f"[dim]Max Retries When Stuck: {max_retries_when_stuck}[/dim]")
     console.print()
 
     try:
@@ -316,6 +325,7 @@ def main(
                 large_diff_action=large_diff_action,
                 fail_on_error=fail_on_review_error,
                 timeout=timeout,
+                max_retries_when_stuck=max_retries_when_stuck,
             )
 
             progress.update(task, description="Review complete!")
