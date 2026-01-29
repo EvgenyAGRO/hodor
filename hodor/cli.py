@@ -107,9 +107,9 @@ def parse_llm_args(ctx, param, value):
 )
 @click.option(
     "--max-iterations",
-    default=500,
+    default=100,
     type=int,
-    help="Maximum number of agent iterations/steps (default: 500, use -1 for unlimited)",
+    help="Maximum number of agent iterations/steps (default: 100, use -1 for unlimited)",
 )
 @click.option(
     "--max-file-diff-lines",
@@ -153,6 +153,12 @@ def parse_llm_args(ctx, param, value):
     help="Maximum retries when agent gets stuck (default: 1, set to 0 to disable). Each retry starts fresh from scratch.",
 )
 @click.option(
+    "--max-retries-on-parse-failure",
+    default=1,
+    type=int,
+    help="Maximum retries when JSON parsing fails despite valid-looking output (default: 1, set to 0 to disable).",
+)
+@click.option(
     "--json-logs",
     is_flag=True,
     help="Output logs in JSON format for log aggregation systems",
@@ -188,6 +194,7 @@ def main(
         ultrathink: bool,
         timeout: int,
         max_retries_when_stuck: int,
+        max_retries_on_parse_failure: int,
         json_logs: bool,
         log_file: str | None,
         skip_health_checks: bool,
@@ -282,6 +289,23 @@ def main(
         if "extended_thinking_budget" not in llm:
             llm = {**llm, "extended_thinking_budget": 500000}
 
+    # Warn about potentially unstable models
+    model_lower = model.lower()
+    if "preview" in model_lower or "experimental" in model_lower:
+        console.print(
+            "\n[yellow]⚠️  Warning: Using a preview/experimental model which may be unstable.[/yellow]"
+        )
+        console.print(
+            "[dim]   Recommended stable models: anthropic/claude-sonnet-4-5-20250929, anthropic/claude-sonnet-4-20250514[/dim]\n"
+        )
+    elif "flash" in model_lower:
+        console.print(
+            "\n[yellow]⚠️  Warning: Flash models are optimized for speed/cost, not quality.[/yellow]"
+        )
+        console.print(
+            "[dim]   For better code review quality, consider: anthropic/claude-sonnet-4-5-20250929[/dim]\n"
+        )
+
     console.print("\n[bold cyan]🚪 Hodor - AI Code Review Agent[/bold cyan]")
     console.print(f"[dim]Platform: {platform.upper()}[/dim]")
     console.print(f"[dim]PR URL: {pr_url}[/dim]")
@@ -326,6 +350,7 @@ def main(
                 fail_on_error=fail_on_review_error,
                 timeout=timeout,
                 max_retries_when_stuck=max_retries_when_stuck,
+                max_retries_on_parse_failure=max_retries_on_parse_failure,
             )
 
             progress.update(task, description="Review complete!")

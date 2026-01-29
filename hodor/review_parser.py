@@ -10,10 +10,13 @@ This handles cases where the LLM wraps JSON in markdown fences or adds prose.
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,11 +70,16 @@ class ReviewFinding:
         # Handle simplified schema (GitLab inline)
         if "path" in data and "line" in data:
             file_path = data["path"]
+            # Robust line number parsing (handle string or int)
             line = data["line"]
+            if isinstance(line, str):
+                line = int(line) if line.isdigit() else 1
+            elif not isinstance(line, int):
+                line = 1
             return cls(
                 title=data.get("title", "Review Finding"),  # Default title if missing
-                body=data["body"],
-                confidence_score=data.get("confidence_score", 1.0),  # Default confidence
+                body=data.get("body", ""),  # Default to empty string if missing
+                confidence_score=float(data.get("confidence_score", 1.0)),  # Default confidence
                 code_location=ReviewCodeLocation(
                     absolute_file_path=Path(file_path),  # Will be relative path usually
                     line_range=ReviewLineRange(start=line, end=line),
@@ -79,11 +87,11 @@ class ReviewFinding:
                 priority=data.get("priority"),
             )
 
-        # Handle standard schema
+        # Handle standard schema with defensive defaults
         return cls(
-            title=data["title"],
-            body=data["body"],
-            confidence_score=data["confidence_score"],
+            title=data.get("title", "Review Finding"),
+            body=data.get("body", ""),
+            confidence_score=float(data.get("confidence_score", 1.0)),
             code_location=ReviewCodeLocation.from_dict(data["code_location"]),
             priority=data.get("priority"),
         )
@@ -116,11 +124,19 @@ class ReviewOutputEvent:
         if not overall_explanation and "summary" in data:
             overall_explanation = data["summary"]
 
+        # Parse findings with graceful error handling for individual items
+        findings = []
+        for i, f in enumerate(data.get("findings", [])):
+            try:
+                findings.append(ReviewFinding.from_dict(f))
+            except Exception as e:
+                logger.warning(f"Skipped malformed finding at index {i}: {e}. Data: {f}")
+
         return cls(
-            findings=[ReviewFinding.from_dict(f) for f in data.get("findings", [])],
+            findings=findings,
             overall_correctness=data.get("overall_correctness", ""),
             overall_explanation=overall_explanation,
-            overall_confidence_score=data.get("overall_confidence_score", 0.0),
+            overall_confidence_score=float(data.get("overall_confidence_score", 0.0)),
         )
 
     def to_dict(self) -> dict:
@@ -184,6 +200,40 @@ def parse_review_output(text: str) -> ReviewOutputEvent:
         overall_explanation=text,
         overall_confidence_score=0.0,
     )
+
+
+def looks_like_valid_json_with_findings(text: str) -> bool:
+    """
+    Check if text appears to contain valid JSON with findings but parsing may have failed.
+
+    This is used to detect cases where the raw output looks like it has valid findings
+    but the parser returned an empty list (possibly due to truncation, encoding issues,
+    or malformed individual findings).
+
+    Args:
+        text: Raw output text from the model
+
+    Returns:
+        True if text appears to contain findings that should have been parsed
+    """
+    if not text:
+        return False
+
+    # Must have findings array structure (not empty)
+    if '"findings"' not in text:
+        return False
+
+    # Check if it's an empty findings array
+    if '"findings": []' in text or '"findings":[]' in text:
+        return False
+
+    # Must have at least one finding with required fields
+    has_path = '"path"' in text or '"absolute_file_path"' in text
+    has_body = '"body"' in text
+    has_line = '"line"' in text or '"line_range"' in text
+
+    # If it has findings array and at least path+body, it should have parsed
+    return has_path and has_body
 
 
 def format_review_markdown(review: ReviewOutputEvent) -> str:

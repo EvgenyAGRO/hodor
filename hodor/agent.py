@@ -28,7 +28,7 @@ from .gitlab import (
 from .llm import create_hodor_agent
 from .metrics import MetricsCollector, check_memory_usage
 from .prompts.pr_review_prompt import build_pr_review_prompt
-from .review_parser import parse_review_output
+from .review_parser import parse_review_output, looks_like_valid_json_with_findings
 from .skills import discover_skills
 from .workspace import cleanup_workspace, setup_workspace
 from .duplicate_detector import parse_existing_comments, is_duplicate_finding
@@ -52,6 +52,20 @@ class ReviewTimeoutError(Exception):
 class StuckPatternError(Exception):
     """Raised when agent is stuck producing empty responses and nudge recovery failed."""
     pass
+
+
+class ToolErrorLoopError(Exception):
+    """Raised when agent is stuck in a loop of repeated tool errors."""
+    pass
+
+
+class ParsingFailedError(Exception):
+    """Raised when JSON parsing appears to have failed despite valid-looking output."""
+    pass
+
+
+# Threshold for detecting tool error loop: consecutive identical tool errors
+TOOL_ERROR_LOOP_THRESHOLD = 3
 
 
 class TimeoutHandler:
@@ -408,13 +422,14 @@ def review_pr(
         cleanup: bool = True,
         workspace_dir: Path | None = None,
         output_format: str = "markdown",
-        max_iterations: int = 500,
+        max_iterations: int = 100,
         max_diff_lines: int = 1500,
         max_diff_bytes: int = 200000,
         large_diff_action: str = "preview",
         fail_on_error: bool = False,
         timeout: int = DEFAULT_REVIEW_TIMEOUT,
         max_retries_when_stuck: int = 1,
+        max_retries_on_parse_failure: int = 1,
 ) -> str:
     """
     Review a pull request using OpenHands agent with bash tools.
@@ -431,13 +446,14 @@ def review_pr(
         cleanup: Clean up workspace after review (default: True)
         workspace_dir: Directory to use for workspace (if None, creates temp dir). Reuses if same repo.
         output_format: Output format - "markdown" or "json" (default: "markdown")
-        max_iterations: Maximum number of agent iterations (default: 500, use -1 for unlimited)
+        max_iterations: Maximum number of agent iterations (default: 100, use -1 for unlimited)
         max_diff_lines: Maximum lines per file diff before trimming
         max_diff_bytes: Maximum bytes per file diff before trimming
         large_diff_action: Action for large diffs (skip, preview, sample, summarize)
         fail_on_error: If True, raise exception on review failure instead of fallback
         timeout: Maximum time in seconds for the review (default: 1800 = 30 minutes)
         max_retries_when_stuck: Maximum retries when stuck pattern detected (default: 1, 0 to disable)
+        max_retries_on_parse_failure: Maximum retries when JSON parsing fails (default: 1, 0 to disable)
 
     Returns:
         Review text as string (format depends on output_format)
@@ -730,6 +746,23 @@ def review_pr(
                 except Exception as e:
                     logger.warning(f"Failed to get metrics: {e}")
 
+            # Check for parsing failure before declaring success
+            # If the output looks like it has findings but parsing returns empty, retry
+            parsed = parse_review_output(review_content)
+            if (
+                not parsed.findings
+                and looks_like_valid_json_with_findings(review_content)
+                and max_retries_on_parse_failure > 0
+            ):
+                logger.warning(
+                    "JSON parsing returned 0 findings but output appears to contain valid findings. "
+                    "This may indicate truncation or encoding issues."
+                )
+                logger.warning(f"Raw output sample (first 500 chars): {review_content[:500]!r}")
+                raise ParsingFailedError(
+                    "Valid-looking JSON with findings parsed to empty list"
+                )
+
             # Record success and finalize metrics
             metrics.record_success()
             final_metrics = metrics.finalize()
@@ -745,6 +778,23 @@ def review_pr(
 
             return review_content
 
+        except ParsingFailedError as e:
+            # Parsing failed despite valid-looking output - retry
+            last_conversation = conversation
+            last_error = e
+            max_retries_on_parse_failure -= 1  # Decrement retry counter
+
+            if max_retries_on_parse_failure >= 0 and not is_last_attempt:
+                logger.warning(f"Parsing failed on attempt {attempt + 1}: {e}")
+                continue
+            else:
+                logger.error(f"Parsing failure persists after retries: {e}")
+                # Return the raw content anyway - let caller decide what to do
+                if workspace and cleanup:
+                    cleanup_workspace(workspace)
+                _terminal_safety.restore_terminal_state()
+                return review_content
+
         except StuckPatternError as e:
             # Save conversation for potential recovery after all retries exhausted
             last_conversation = conversation
@@ -756,6 +806,20 @@ def review_pr(
                 continue
             else:
                 logger.error(f"Stuck pattern persists after {total_attempts} attempt(s): {e}")
+                # Fall through to post-loop fallback handling
+                break
+
+        except ToolErrorLoopError as e:
+            # Tool error loops should trigger retry (the model may behave differently on retry)
+            last_conversation = conversation
+            last_error = e
+
+            if not is_last_attempt:
+                logger.warning(f"Tool error loop detected on attempt {attempt + 1}: {e}")
+                # Don't clean up here - cleanup happens at start of next iteration
+                continue
+            else:
+                logger.error(f"Tool error loop persists after {total_attempts} attempt(s): {e}")
                 # Fall through to post-loop fallback handling
                 break
 
@@ -809,6 +873,14 @@ def review_pr(
         metrics.finalize()
         raise RuntimeError(
             f"Review failed after {total_attempts} attempt(s) due to stuck pattern with no recoverable content: {error_msg}"
+        )
+
+    # For ToolErrorLoopError with no content: always fail
+    if isinstance(last_error, ToolErrorLoopError):
+        metrics.record_error(error_msg, fallback_used=False)
+        metrics.finalize()
+        raise RuntimeError(
+            f"Review failed after {total_attempts} attempt(s) due to tool error loop with no recoverable content: {error_msg}"
         )
 
     # For timeout: generate fallback if not fail_on_error
@@ -955,6 +1027,76 @@ def detect_stuck_pattern(events: list[Any]) -> tuple[bool, int]:
     return is_stuck, consecutive_empty
 
 
+def detect_tool_error_loop(events: list[Any]) -> tuple[bool, int, str | None]:
+    """
+    Detect if the agent is stuck in a loop of repeated tool errors.
+
+    This function scans the event history to detect when the same tool error
+    occurs multiple times consecutively, indicating the agent is stuck making
+    invalid tool calls (e.g., "Cannot use reset=True with is_input=True").
+
+    Args:
+        events: List of conversation events from OpenHands SDK
+
+    Returns:
+        Tuple of (is_in_error_loop: bool, consecutive_error_count: int, error_message: str | None)
+        - is_in_error_loop is True if consecutive identical errors >= TOOL_ERROR_LOOP_THRESHOLD
+        - consecutive_error_count is the number of consecutive identical errors
+        - error_message is the repeated error message (if in loop)
+    """
+    if not events:
+        return False, 0, None
+
+    consecutive_errors = 0
+    last_error_message: str | None = None
+
+    # Scan events from the end to find consecutive identical tool errors
+    for event in reversed(events):
+        # Check for error in the event
+        error = getattr(event, "error", None)
+        if not error:
+            # Also check observation for tool execution errors
+            observation = getattr(event, "observation", None)
+            if observation:
+                # Check for error_message attribute (tool execution errors)
+                error = getattr(observation, "error_message", None)
+                if not error:
+                    # Check content for error patterns
+                    content = getattr(observation, "content", "")
+                    if isinstance(content, str) and "Error executing tool" in content:
+                        error = content
+
+        if error and isinstance(error, str):
+            if last_error_message is None:
+                last_error_message = error
+                consecutive_errors = 1
+            elif error == last_error_message or _errors_are_similar(error, last_error_message):
+                consecutive_errors += 1
+            else:
+                # Different error breaks the streak
+                break
+        elif last_error_message is not None:
+            # Non-error event after errors - check if we have enough
+            break
+
+    is_in_loop = consecutive_errors >= TOOL_ERROR_LOOP_THRESHOLD
+    return is_in_loop, consecutive_errors, last_error_message if is_in_loop else None
+
+
+def _errors_are_similar(error1: str, error2: str) -> bool:
+    """Check if two error messages are similar enough to be considered the same error type."""
+    # Extract key error patterns
+    patterns = [
+        "Cannot use reset=True with is_input=True",
+        "Error executing tool",
+        "terminal",
+    ]
+    for pattern in patterns:
+        if pattern in error1 and pattern in error2:
+            return True
+    return False
+
+
 def get_nudge_prompt(recent_events: list[Any] | None = None) -> str:
     """
     Generate a context-aware nudge prompt to unstick the agent.
@@ -1008,9 +1150,9 @@ def run_with_nudge_recovery(
     """
     Run the conversation with automatic nudge recovery for stuck patterns.
 
-    If the agent gets stuck producing empty responses, this function will
-    inject a nudge prompt and resume the conversation. It will attempt
-    up to max_nudges times before giving up.
+    If the agent gets stuck producing empty responses or in a tool error loop,
+    this function will inject a nudge prompt and resume the conversation.
+    It will attempt up to max_nudges times before giving up.
 
     Args:
         conversation: OpenHands Conversation object
@@ -1021,6 +1163,7 @@ def run_with_nudge_recovery(
 
     Raises:
         StuckPatternError: If agent is stuck and nudge recovery failed.
+        ToolErrorLoopError: If agent is stuck in repeated tool errors.
         RuntimeError: If no content produced but agent not stuck.
     """
     # Use module-level import for testability
@@ -1038,7 +1181,19 @@ def run_with_nudge_recovery(
                 logger.info(f"Successfully recovered after {nudge_count} nudge(s)")
             return review_content
 
-        # Check if stuck
+        # Check for tool error loop first (more specific)
+        is_in_error_loop, error_count, error_msg = detect_tool_error_loop(conversation.state.events)
+
+        if is_in_error_loop:
+            # Tool error loops are not recoverable via nudge - need to retry from scratch
+            logger.warning(
+                f"Tool error loop detected ({error_count} consecutive errors): {error_msg}"
+            )
+            raise ToolErrorLoopError(
+                f"Agent stuck in tool error loop ({error_count} consecutive errors): {error_msg}"
+            )
+
+        # Check if stuck (empty responses)
         is_stuck, empty_count = detect_stuck_pattern(conversation.state.events)
 
         if not is_stuck:

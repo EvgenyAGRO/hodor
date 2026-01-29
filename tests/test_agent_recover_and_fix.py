@@ -717,3 +717,174 @@ def test_run_with_nudge_recovery_logs_nudge_attempts(caplog):
 
     # Should log about nudge attempt
     assert any("nudge" in record.message.lower() for record in caplog.records)
+
+
+# ============================================================================
+# Tests for tool error loop detection (new feature)
+# ============================================================================
+
+from hodor.agent import (
+    detect_tool_error_loop,
+    _errors_are_similar,
+    ToolErrorLoopError,
+    TOOL_ERROR_LOOP_THRESHOLD,
+)
+
+
+class MockObservationWithError:
+    """Mock observation with error message."""
+
+    def __init__(self, error_message=None, content=None):
+        self.error_message = error_message
+        self.content = content or ""
+
+
+def test_detect_tool_error_loop_finds_consecutive_errors():
+    """Test that we detect tool error loop when there are consecutive identical errors."""
+    events = []
+
+    # Create events with repeated tool errors
+    for i in range(TOOL_ERROR_LOOP_THRESHOLD):
+        event = MockEventBase()
+        event.action = None
+        event.error = "Error executing tool 'terminal': Cannot use reset=True with is_input=True"
+        events.append(event)
+
+    is_in_loop, error_count, error_msg = detect_tool_error_loop(events)
+
+    assert is_in_loop is True
+    assert error_count >= TOOL_ERROR_LOOP_THRESHOLD
+    assert "reset=True" in error_msg
+
+
+def test_detect_tool_error_loop_ignores_single_error():
+    """Test that a single error doesn't trigger loop detection."""
+    events = []
+
+    # Just one error
+    event = MockEventBase()
+    event.action = None
+    event.error = "Error executing tool 'terminal': Cannot use reset=True with is_input=True"
+    events.append(event)
+
+    is_in_loop, error_count, error_msg = detect_tool_error_loop(events)
+
+    assert is_in_loop is False
+    assert error_count == 1
+    assert error_msg is None
+
+
+def test_detect_tool_error_loop_handles_empty_events():
+    """Test that empty event list is handled gracefully."""
+    is_in_loop, error_count, error_msg = detect_tool_error_loop([])
+
+    assert is_in_loop is False
+    assert error_count == 0
+    assert error_msg is None
+
+
+def test_detect_tool_error_loop_detects_via_observation():
+    """Test detection when error is in observation instead of event.error."""
+    events = []
+
+    for i in range(TOOL_ERROR_LOOP_THRESHOLD):
+        event = MockEventBase()
+        event.action = None
+        event.error = None
+        event.observation = MockObservationWithError(
+            error_message="Error executing tool 'terminal': Cannot use reset=True with is_input=True"
+        )
+        events.append(event)
+
+    is_in_loop, error_count, error_msg = detect_tool_error_loop(events)
+
+    assert is_in_loop is True
+    assert error_count >= TOOL_ERROR_LOOP_THRESHOLD
+
+
+def test_detect_tool_error_loop_different_errors_break_streak():
+    """Test that different errors break the consecutive count."""
+    events = []
+
+    # Two errors of one type
+    for i in range(2):
+        event = MockEventBase()
+        event.action = None
+        event.error = "Error type A"
+        events.append(event)
+
+    # Then different error
+    event = MockEventBase()
+    event.action = None
+    event.error = "Completely different error"
+    events.append(event)
+
+    is_in_loop, error_count, error_msg = detect_tool_error_loop(events)
+
+    # Should not be in loop since streak broken
+    assert is_in_loop is False
+
+
+def test_errors_are_similar_matches_terminal_errors():
+    """Test that _errors_are_similar correctly identifies similar terminal errors."""
+    error1 = "Error executing tool 'terminal': Cannot use reset=True with is_input=True"
+    error2 = "Error executing tool 'terminal': Cannot use reset=True with is_input=True"
+
+    assert _errors_are_similar(error1, error2) is True
+
+
+def test_errors_are_similar_matches_partial_patterns():
+    """Test that errors containing same pattern are considered similar."""
+    error1 = "Something Error executing tool happened"
+    error2 = "Different context but Error executing tool here too"
+
+    assert _errors_are_similar(error1, error2) is True
+
+
+def test_errors_are_similar_rejects_unrelated_errors():
+    """Test that completely different errors are not considered similar."""
+    error1 = "Network timeout occurred"
+    error2 = "File not found"
+
+    assert _errors_are_similar(error1, error2) is False
+
+
+def test_run_with_nudge_recovery_raises_tool_error_loop():
+    """Test that run_with_nudge_recovery raises ToolErrorLoopError when tool error loop detected."""
+    mock_conversation = MagicMock()
+    mock_conversation.state.events = []
+    mock_conversation.run.return_value = None
+
+    import hodor.agent as agent_module
+
+    with patch.object(agent_module, "get_agent_final_response") as mock_get_response:
+        with patch.object(agent_module, "detect_stuck_pattern") as mock_detect_stuck:
+            with patch.object(agent_module, "detect_tool_error_loop") as mock_detect_error:
+                mock_get_response.return_value = ""  # No content
+                mock_detect_stuck.return_value = (False, 0)  # Not stuck
+                # But tool error loop detected
+                mock_detect_error.return_value = (True, 3, "Error executing tool")
+
+                with pytest.raises(ToolErrorLoopError):
+                    run_with_nudge_recovery(mock_conversation)
+
+
+def test_run_with_nudge_recovery_tool_error_takes_priority():
+    """Test that tool error loop is checked before stuck pattern."""
+    mock_conversation = MagicMock()
+    mock_conversation.state.events = []
+    mock_conversation.run.return_value = None
+
+    import hodor.agent as agent_module
+
+    with patch.object(agent_module, "get_agent_final_response") as mock_get_response:
+        with patch.object(agent_module, "detect_stuck_pattern") as mock_detect_stuck:
+            with patch.object(agent_module, "detect_tool_error_loop") as mock_detect_error:
+                mock_get_response.return_value = ""
+                # Both conditions are true
+                mock_detect_stuck.return_value = (True, 3)
+                mock_detect_error.return_value = (True, 3, "Error")
+
+                # Should raise ToolErrorLoopError, not StuckPatternError
+                with pytest.raises(ToolErrorLoopError):
+                    run_with_nudge_recovery(mock_conversation)
