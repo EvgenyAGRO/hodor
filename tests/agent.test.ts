@@ -85,7 +85,7 @@ describe("formatMetricsMarkdown", () => {
     expect(markdown).toContain("3 turns");
     expect(markdown).toContain("8 tool calls");
     expect(markdown).toContain("2m 5s");
-    expect(markdown).toContain("in `1.0K`");
+    expect(markdown).toContain("in `1.9K`"); // totalInput = inputTokens (1000) + cacheReadTokens (900)
     expect(markdown).toContain("cached `900`");
     expect(markdown).toContain("out `80`");
     expect(markdown).toContain("Cost: `$1.2345`");
