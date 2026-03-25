@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { logger } from "./utils/logger.js";
 import type { ReviewMetrics } from "./types.js";
 
 function tok(value: number): string {
@@ -66,4 +67,70 @@ export function printMetrics(metrics: ReviewMetrics, stream: NodeJS.WritableStre
   }
 
   write(dim("─".repeat(50)));
+}
+
+/**
+ * Push review metrics to a Prometheus Pushgateway.
+ * Failures are logged as warnings and never thrown.
+ */
+export async function pushMetrics(opts: {
+  pushgatewayUrl: string;
+  metrics: ReviewMetrics;
+  labels?: Record<string, string>;
+}): Promise<void> {
+  const { pushgatewayUrl, metrics, labels = {} } = opts;
+
+  // Build label string for all metrics
+  const labelPairs = Object.entries(labels)
+    .map(([k, v]) => `${k}="${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
+    .join(",");
+  const labelSuffix = labelPairs ? `{${labelPairs}}` : "";
+
+  const totalInput = metrics.inputTokens + metrics.cacheReadTokens;
+  const lines = [
+    `# HELP hodor_review_input_tokens_total Total input tokens (fresh + cached)`,
+    `# TYPE hodor_review_input_tokens_total gauge`,
+    `hodor_review_input_tokens_total${labelSuffix} ${totalInput}`,
+    `# HELP hodor_review_output_tokens_total Total output tokens`,
+    `# TYPE hodor_review_output_tokens_total gauge`,
+    `hodor_review_output_tokens_total${labelSuffix} ${metrics.outputTokens}`,
+    `# HELP hodor_review_cache_read_tokens_total Tokens served from prompt cache`,
+    `# TYPE hodor_review_cache_read_tokens_total gauge`,
+    `hodor_review_cache_read_tokens_total${labelSuffix} ${metrics.cacheReadTokens}`,
+    `# HELP hodor_review_cost_dollars Cost of the review in USD`,
+    `# TYPE hodor_review_cost_dollars gauge`,
+    `hodor_review_cost_dollars${labelSuffix} ${metrics.cost}`,
+    `# HELP hodor_review_turns_total Number of agent turns`,
+    `# TYPE hodor_review_turns_total gauge`,
+    `hodor_review_turns_total${labelSuffix} ${metrics.turns}`,
+    `# HELP hodor_review_tool_calls_total Number of tool calls`,
+    `# TYPE hodor_review_tool_calls_total gauge`,
+    `hodor_review_tool_calls_total${labelSuffix} ${metrics.toolCalls}`,
+    `# HELP hodor_review_duration_seconds Review duration in seconds`,
+    `# TYPE hodor_review_duration_seconds gauge`,
+    `hodor_review_duration_seconds${labelSuffix} ${metrics.durationSeconds}`,
+    "",
+  ];
+  const body = lines.join("\n");
+
+  // POST to pushgateway: /metrics/job/<job>
+  const baseUrl = pushgatewayUrl.replace(/\/+$/, "");
+  const url = `${baseUrl}/metrics/job/hodor`;
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      logger.warn(`Pushgateway returned ${res.status}: ${text.slice(0, 200)}`);
+    } else {
+      logger.info("Metrics pushed to Pushgateway");
+    }
+  } catch (err) {
+    logger.warn(`Failed to push metrics to Pushgateway: ${err instanceof Error ? err.message : err}`);
+  }
 }

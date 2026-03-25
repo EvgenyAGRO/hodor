@@ -7,6 +7,7 @@ import "dotenv/config";
 import { detectPlatform, postReviewComment, reviewPr } from "./agent.js";
 import type { AgentProgressEvent } from "./agent.js";
 import { renderMarkdown } from "./render.js";
+import { pushMetrics } from "./metrics.js";
 import { setLogLevel } from "./utils/logger.js";
 
 const program = new Command();
@@ -49,6 +50,14 @@ program
     "Enable maximum reasoning effort with extended thinking budget",
     false,
   )
+  .option(
+    "--bedrock-tags <json>",
+    "JSON object of cost allocation tags for Bedrock requests (e.g., '{\"team\":\"platform\"}')",
+  )
+  .option(
+    "--prometheus-push <url>",
+    "Push review metrics to a Prometheus Pushgateway URL",
+  )
   .action(async (prUrl: string, cmdOpts: Record<string, unknown>) => {
     const verbose = cmdOpts.verbose as boolean;
     const post = cmdOpts.post as boolean;
@@ -58,6 +67,8 @@ program
     const promptFile = cmdOpts.promptFile as string | undefined;
     const workspace = cmdOpts.workspace as string | undefined;
     const ultrathink = cmdOpts.ultrathink as boolean;
+    const bedrockTagsRaw = cmdOpts.bedrockTags as string | undefined;
+    const prometheusPush = cmdOpts.prometheusPush as string | undefined;
 
     // Auto-detect CI environment
     const isCI = !!(process.env.CI || process.env.GITLAB_CI || process.env.GITHUB_ACTIONS);
@@ -68,6 +79,17 @@ program
     // Handle ultrathink
     if (ultrathink) {
       reasoningEffort = "high";
+    }
+
+    // Parse Bedrock cost allocation tags
+    let bedrockTags: Record<string, string> | null = null;
+    if (bedrockTagsRaw) {
+      try {
+        bedrockTags = JSON.parse(bedrockTagsRaw) as Record<string, string>;
+      } catch {
+        console.error(chalk.red("Error: --bedrock-tags must be valid JSON"));
+        process.exit(1);
+      }
     }
 
     const log = console.log;
@@ -188,7 +210,7 @@ program
       log();
 
       streamLog(chalk.dim("▶ Setting up workspace..."));
-      const { review, metricsFooter, headSha } = await reviewPr({
+      const { review, metricsFooter, headSha, metrics } = await reviewPr({
         prUrl,
         model,
         reasoningEffort,
@@ -198,6 +220,7 @@ program
         workspaceDir: workspace,
         includeMetricsFooter: post,
         onEvent: handleEvent,
+        bedrockTags,
       });
       const reviewText = renderMarkdown(review);
 
@@ -232,6 +255,19 @@ program
             "\nTip: Use --post to automatically post this review to the PR/MR",
           ),
         );
+      }
+
+      // Push metrics to Prometheus Pushgateway (best-effort, never fails the run)
+      if (prometheusPush) {
+        await pushMetrics({
+          pushgatewayUrl: prometheusPush,
+          metrics,
+          labels: {
+            platform,
+            model,
+            verdict: review.overall_correctness === "patch is correct" ? "correct" : "incorrect",
+          },
+        });
       }
     } catch (err) {
       streamLog(chalk.red("✗ Review failed"));

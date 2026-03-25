@@ -176,7 +176,8 @@ export async function reviewPr(opts: {
   workspaceDir?: string | null;
   includeMetricsFooter?: boolean;
   onEvent?: (event: AgentProgressEvent) => void;
-}): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null }> {
+  bedrockTags?: Record<string, string> | null;
+}): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null; metrics: ReviewMetrics }> {
   const {
     prUrl,
     model = "anthropic/claude-sonnet-4-5-20250929",
@@ -187,6 +188,7 @@ export async function reviewPr(opts: {
     workspaceDir,
     includeMetricsFooter = false,
     onEvent,
+    bedrockTags,
   } = opts;
 
   logger.info(`Starting PR review for: ${prUrl}`);
@@ -407,6 +409,7 @@ export async function reviewPr(opts: {
       name: "submit_review",
       label: "Submit Review",
       description: "Submit the final structured review after the analysis is complete.",
+      promptSnippet: "Submit the final structured review (call exactly once when done)",
       parameters: SUBMIT_REVIEW_SCHEMA,
       execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
         submitReviewCalls++;
@@ -451,6 +454,18 @@ export async function reviewPr(opts: {
       settingsManager,
       resourceLoader,
     });
+
+    // Inject Bedrock cost allocation tags into stream requests
+    if (bedrockTags && parsed.provider === "bedrock") {
+      type AgentWithStream = { agent: { streamFn: (...args: unknown[]) => unknown } };
+      const agent = (session as unknown as AgentWithStream).agent;
+      const originalStreamFn = agent.streamFn;
+      agent.streamFn = (...args: unknown[]) => {
+        const options = (args[2] ?? {}) as Record<string, unknown>;
+        return originalStreamFn(args[0], args[1], { ...options, requestMetadata: bedrockTags });
+      };
+      logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
+    }
 
     // Subscribe to agent events for progress + metrics tracking
     let turnCount = 0;
@@ -630,7 +645,7 @@ export async function reviewPr(opts: {
       metricsFooter = formatMetricsMarkdown(metrics);
     }
 
-    return { review, metricsFooter, headSha };
+    return { review, metricsFooter, headSha, metrics };
   } finally {
     // Restore mutated env vars
     for (const [key, val] of Object.entries(envSnapshot)) {
