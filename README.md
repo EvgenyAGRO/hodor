@@ -43,10 +43,6 @@ npx @mrkaran/hodor https://gitlab.example.com/org/project/-/merge_requests/42
 # Post the review as a PR/MR comment
 npx @mrkaran/hodor <PR_URL> --post
 
-# Review local changes (no PR URL needed)
-npx @mrkaran/hodor --local                         # diff against origin/main
-npx @mrkaran/hodor --local --diff-against HEAD~1   # diff against specific ref
-
 # Use a different model
 npx @mrkaran/hodor <PR_URL> --model openai/gpt-5
 npx @mrkaran/hodor <PR_URL> --model bedrock/converse/anthropic.claude-sonnet-4-5-v2
@@ -62,6 +58,35 @@ npx @mrkaran/hodor <PR_URL> -v
 ```
 
 > If you installed globally with `npm install -g`, replace `npx @mrkaran/hodor` with `hodor`.
+
+## Local Mode
+
+Review local git changes without a PR URL. Useful for pre-push reviews, Bitbucket PRs, or any git repo.
+
+```bash
+# Review uncommitted changes against origin/main (default)
+npx @mrkaran/hodor --local
+
+# Review against a specific branch or ref
+npx @mrkaran/hodor --local --diff-against develop
+npx @mrkaran/hodor --local --diff-against HEAD~3
+
+# Review a feature branch against main
+git checkout feature-branch
+npx @mrkaran/hodor --local --diff-against origin/main
+
+# Use a specific workspace directory
+npx @mrkaran/hodor --local --workspace /path/to/repo
+
+# Combine with other flags
+npx @mrkaran/hodor --local --diff-against origin/main --model openai/gpt-5 -v
+```
+
+Local mode:
+- Includes **uncommitted changes** (staged + unstaged), not just commits
+- Auto-resolves to the **git repo root** (works from subdirectories)
+- Skips PR metadata fetching and workspace cloning
+- `--post` is disabled (no remote to post to)
 
 ## CLI Flags
 
