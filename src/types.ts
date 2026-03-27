@@ -1,4 +1,4 @@
-export type Platform = "github" | "gitlab";
+export type Platform = "github" | "gitlab" | "gitea";
 
 export interface ParsedPrUrl {
   owner: string;

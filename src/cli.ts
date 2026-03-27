@@ -15,13 +15,13 @@ const program = new Command();
 program
   .name("hodor")
   .description(
-    "AI-powered code review agent for GitHub PRs, GitLab MRs, and local diffs.\n\n" +
+    "AI-powered code review agent for GitHub PRs, GitLab MRs, Gitea/Forgejo PRs, and local diffs.\n\n" +
       "Hodor uses an AI agent that clones the repository, checks out the PR branch,\n" +
       "and analyzes the code using tools (gh, git, glab) for metadata fetching and comment posting.\n\n" +
       "For local reviews, use --local with --diff-against to review changes in your current git repository.",
   )
-  .version("0.4.1")
-  .argument("[pr-url]", "URL of the GitHub PR or GitLab MR to review (optional with --local)")
+  .version("0.5.1")
+  .argument("[pr-url]", "URL of the GitHub PR, GitLab MR, or Gitea/Forgejo PR to review (optional with --local)")
   .option(
     "--model <model>",
     "LLM model to use (e.g., anthropic/claude-sonnet-4-5-20250929, openai/gpt-5)",
@@ -93,7 +93,7 @@ program
     }
 
     // Auto-detect CI environment
-    const isCI = !!(process.env.CI || process.env.GITLAB_CI || process.env.GITHUB_ACTIONS);
+    const isCI = !!(process.env.CI || process.env.GITLAB_CI || process.env.GITHUB_ACTIONS || process.env.GITEA_ACTIONS || process.env.FORGEJO_ACTIONS);
 
     if (verbose) setLogLevel("debug");
     else if (isCI) setLogLevel("info");
@@ -206,6 +206,12 @@ program
         } else if (platform === "gitlab" && !gitlabToken) {
           console.error(chalk.yellow("Warning: No GitLab token detected. Set GITLAB_TOKEN (api scope)."));
           console.error(chalk.dim("  Export GITLAB_TOKEN and optionally GITLAB_HOST.\n"));
+        } else if (platform === "gitea") {
+          const giteaToken = process.env.GITEA_TOKEN ?? process.env.FORGEJO_TOKEN;
+          if (!giteaToken) {
+            console.error(chalk.yellow("Warning: No Gitea/Forgejo token detected. Set GITEA_TOKEN for authentication."));
+            console.error(chalk.dim("  Export GITEA_TOKEN (or FORGEJO_TOKEN) for API access.\n"));
+          }
         }
       }
 
@@ -256,7 +262,7 @@ program
 
         if (result.success) {
           log(chalk.bold.green("Review posted successfully!"));
-          log(chalk.dim(`  ${platform === "github" ? "PR" : "MR"}: ${prUrl}`));
+          log(chalk.dim(`  ${platform === "gitlab" ? "MR" : "PR"}: ${prUrl}`));
         } else {
           log(chalk.bold.red(`Failed to post review: ${result.error}`));
           log(chalk.yellow("\nReview output:\n"));
