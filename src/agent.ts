@@ -11,6 +11,10 @@ import {
   fetchGitlabMrInfo,
   postGitlabMrComment,
 } from "./gitlab.js";
+import {
+  fetchGiteaPrInfo,
+  postGiteaPrComment,
+} from "./gitea.js";
 import { setupWorkspace, cleanupWorkspace } from "./workspace.js";
 import { buildPrReviewPrompt } from "./prompt.js";
 import { parseModelString, mapReasoningEffort, getApiKey } from "./model.js";
@@ -42,11 +46,15 @@ export function detectPlatform(prUrl: string): Platform {
   if (prUrl.includes("/-/merge_requests/") || hostname.includes("gitlab")) {
     return "gitlab";
   }
+  // Gitea/Forgejo: /pulls/ (plural) — must check before GitHub since /pulls/ contains /pull/
+  if (prUrl.includes("/pulls/") || hostname.includes("gitea") || hostname.includes("forgejo") || hostname.includes("codeberg")) {
+    return "gitea";
+  }
   if (prUrl.includes("/pull/") || hostname.includes("github")) {
     return "github";
   }
   throw new Error(
-    `Cannot detect platform for URL: ${prUrl}. Expected a GitHub pull request (/pull/) or GitLab merge request (/-/merge_requests/) URL.`,
+    `Cannot detect platform for URL: ${prUrl}. Expected a GitHub (/pull/), GitLab (/-/merge_requests/), or Gitea/Forgejo (/pulls/) URL.`,
   );
 }
 
@@ -60,6 +68,20 @@ export function parsePrUrl(prUrl: string): ParsedPrUrl {
     const prNumber = parseInt(pathParts[3], 10);
     if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
       throw new Error(`Invalid PR number in URL: ${prUrl}. Expected a positive integer after /pull/.`);
+    }
+    return {
+      owner: pathParts[0],
+      repo: pathParts[1],
+      prNumber,
+      host,
+    };
+  }
+
+  // Gitea/Forgejo format: /owner/repo/pulls/123
+  if (pathParts.length >= 4 && pathParts[2] === "pulls") {
+    const prNumber = parseInt(pathParts[3], 10);
+    if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
+      throw new Error(`Invalid PR number in URL: ${prUrl}. Expected a positive integer after /pulls/.`);
     }
     return {
       owner: pathParts[0],
@@ -95,7 +117,7 @@ export function parsePrUrl(prUrl: string): ParsedPrUrl {
   }
 
   throw new Error(
-    `Invalid PR/MR URL format: ${prUrl}. Expected GitHub pull request or GitLab merge request URL.`,
+    `Invalid PR/MR URL format: ${prUrl}. Expected GitHub (/pull/), GitLab (/-/merge_requests/), or Gitea/Forgejo (/pulls/) URL.`,
   );
 }
 
@@ -142,6 +164,16 @@ export async function postReviewComment(opts: {
       ]);
       logger.info(`Successfully posted review to GitHub PR #${parsed.prNumber}`);
       return { success: true, platform: "github", prNumber: parsed.prNumber };
+    } else if (platform === "gitea") {
+      await postGiteaPrComment(
+        parsed.owner,
+        parsed.repo,
+        parsed.prNumber,
+        body,
+        parsed.host,
+      );
+      logger.info(`Successfully posted review to Gitea PR #${parsed.prNumber}`);
+      return { success: true, platform: "gitea", prNumber: parsed.prNumber };
     } else {
       await postGitlabMrComment(
         parsed.owner,
@@ -346,6 +378,14 @@ export async function reviewPr(opts: {
         mrMetadata = normalizeGithubMetadata(githubRaw);
       } catch (err) {
         logger.warn(`Failed to fetch GitHub metadata: ${err}`);
+      }
+    } else if (!localMode && platform === "gitea") {
+      try {
+        mrMetadata = await fetchGiteaPrInfo(owner, repo, prNumber, host, {
+          includeComments: true,
+        });
+      } catch (err) {
+        logger.warn(`Failed to fetch Gitea metadata: ${err}`);
       }
     }
 

@@ -80,7 +80,7 @@ export function buildPrReviewPrompt(opts: {
     // Plain two-arg diff includes uncommitted (staged + unstaged) changes
     prDiffCmd = `git --no-pager diff ${targetBranch} --name-only`;
     gitDiffCmd = `git --no-pager diff ${targetBranch}`;
-  } else if (platform === "github") {
+  } else if (platform === "github" || platform === "gitea") {
     prDiffCmd = `git --no-pager diff origin/${targetBranch}...HEAD --name-only`;
     gitDiffCmd = `git --no-pager diff origin/${targetBranch}...HEAD`;
   } else {

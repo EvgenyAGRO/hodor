@@ -75,7 +75,7 @@ RUN mkdir -p /workspace /tmp/hodor && \
     chown -R bun:bun /app /workspace /tmp/hodor
 
 LABEL org.opencontainers.image.title="Hodor" \
-      org.opencontainers.image.description="AI-powered code review agent for GitHub and GitLab" \
+      org.opencontainers.image.description="AI-powered code review agent for GitHub, GitLab, and Gitea/Forgejo" \
       org.opencontainers.image.url="https://github.com/mr-karan/hodor" \
       org.opencontainers.image.source="https://github.com/mr-karan/hodor" \
       org.opencontainers.image.vendor="Karan Sharma" \

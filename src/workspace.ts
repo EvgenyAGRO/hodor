@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { exec, execJson } from "./utils/exec.js";
 import { logger } from "./utils/logger.js";
 import { fetchGitlabMrInfo } from "./gitlab.js";
+import { fetchGiteaPrInfo } from "./gitea.js";
 import type { MrMetadata, Platform } from "./types.js";
 
 export class WorkspaceError extends Error {
@@ -43,6 +44,23 @@ function detectCiWorkspace(owner: string, repo: string): CiWorkspace {
       if (projectPath === expected || projectPath.endsWith(`/${expected}`)) {
         logger.info(`Detected GitLab CI environment (target: ${targetBranch ?? "unknown"})`);
         return { path: projectDir, targetBranch, diffBaseSha };
+      }
+    }
+  }
+
+  // Gitea Actions / Forgejo Actions
+  // Must check BEFORE GITHUB_ACTIONS since Gitea/Forgejo Actions sets GITHUB_ACTIONS=true for compat
+  if (process.env.GITEA_ACTIONS === "true" || process.env.FORGEJO_ACTIONS === "true") {
+    const workspaceDir = process.env.GITHUB_WORKSPACE;
+    const repository = process.env.GITHUB_REPOSITORY;
+    const baseRef = process.env.GITHUB_BASE_REF ?? null;
+
+    if (workspaceDir && repository) {
+      const expected = `${owner}/${repo}`;
+      if (repository === expected) {
+        const ciType = process.env.FORGEJO_ACTIONS ? "Forgejo" : "Gitea";
+        logger.info(`Detected ${ciType} Actions environment (base: ${baseRef ?? "unknown"})`);
+        return { path: workspaceDir, targetBranch: baseRef, diffBaseSha: null };
       }
     }
   }
@@ -264,6 +282,98 @@ async function cloneAndCheckoutGitlabMr(
 }
 
 // ---------------------------------------------------------------------------
+// Gitea helpers
+// ---------------------------------------------------------------------------
+
+async function getGiteaPrBranches(
+  owner: string,
+  repo: string,
+  prNumber: string,
+  host?: string,
+): Promise<{ sourceBranch: string; targetBranch: string }> {
+  let prInfo: MrMetadata;
+  try {
+    prInfo = await fetchGiteaPrInfo(owner, repo, Number(prNumber), host);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new WorkspaceError(`Failed to fetch PR info for #${prNumber}: ${msg}`);
+  }
+
+  const sourceBranch = prInfo.source_branch;
+  if (!sourceBranch) {
+    throw new WorkspaceError(`Could not determine source branch for PR #${prNumber}`);
+  }
+
+  return { sourceBranch, targetBranch: prInfo.target_branch ?? "main" };
+}
+
+async function checkoutGiteaBranch(workspace: string, sourceBranch: string): Promise<void> {
+  try {
+    await exec("git", ["checkout", "-b", sourceBranch, `origin/${sourceBranch}`], {
+      cwd: workspace,
+    });
+  } catch {
+    try {
+      await exec("git", ["checkout", sourceBranch], { cwd: workspace });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new WorkspaceError(`Failed to checkout PR branch '${sourceBranch}': ${msg}`);
+    }
+  }
+}
+
+async function fetchAndCheckoutGiteaPr(
+  workspace: string,
+  owner: string,
+  repo: string,
+  prNumber: string,
+  host?: string,
+): Promise<string> {
+  logger.info(`Fetching and checking out PR #${prNumber} in existing workspace`);
+  await exec("git", ["fetch", "origin"], { cwd: workspace });
+
+  const { sourceBranch, targetBranch } = await getGiteaPrBranches(owner, repo, prNumber, host);
+  logger.info(`Source branch: ${sourceBranch}, Target branch: ${targetBranch}`);
+  await checkoutGiteaBranch(workspace, sourceBranch);
+
+  return targetBranch;
+}
+
+async function cloneAndCheckoutGiteaPr(
+  workspace: string,
+  owner: string,
+  repo: string,
+  prNumber: string,
+  host?: string,
+): Promise<string> {
+  const giteaHost = host || process.env.GITEA_HOST || process.env.FORGEJO_HOST;
+  if (!giteaHost) {
+    throw new WorkspaceError("No Gitea/Forgejo host configured. Set GITEA_HOST or FORGEJO_HOST.");
+  }
+  logger.info(`Setting up Gitea workspace for ${owner}/${repo}/pulls/${prNumber}`);
+
+  const token = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN;
+  const cloneUrl = `https://${giteaHost}/${owner}/${repo}.git`;
+  logger.info(`Cloning from ${cloneUrl}...`);
+
+  try {
+    const cloneArgs = token
+      ? ["-c", `http.extraHeader=Authorization: token ${token}`, "clone", cloneUrl, workspace]
+      : ["clone", cloneUrl, workspace];
+    await exec("git", cloneArgs);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new WorkspaceError(`Failed to clone ${owner}/${repo}: ${msg}`);
+  }
+
+  const { sourceBranch, targetBranch } = await getGiteaPrBranches(owner, repo, prNumber, host);
+  logger.info(`Source branch: ${sourceBranch}, Target branch: ${targetBranch}`);
+  await checkoutGiteaBranch(workspace, sourceBranch);
+
+  return targetBranch;
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -306,6 +416,9 @@ export async function setupWorkspace(opts: {
         } else if (platform === "gitlab") {
           const tb = await fetchAndCheckoutGitlabMr(workspace, owner, repo, prNumber, host);
           if (!detectedTargetBranch) detectedTargetBranch = tb;
+        } else if (platform === "gitea") {
+          const tb = await fetchAndCheckoutGiteaPr(workspace, owner, repo, prNumber, host);
+          if (!detectedTargetBranch) detectedTargetBranch = tb;
         }
         const finalTargetBranch = detectedTargetBranch ?? "main";
         logger.info(
@@ -322,6 +435,9 @@ export async function setupWorkspace(opts: {
         if (!detectedTargetBranch) detectedTargetBranch = tb;
       } else if (platform === "gitlab") {
         const tb = await cloneAndCheckoutGitlabMr(workspace, owner, repo, prNumber, host);
+        if (!detectedTargetBranch) detectedTargetBranch = tb;
+      } else if (platform === "gitea") {
+        const tb = await cloneAndCheckoutGiteaPr(workspace, owner, repo, prNumber, host);
         if (!detectedTargetBranch) detectedTargetBranch = tb;
       } else {
         throw new WorkspaceError(`Unsupported platform: ${platform}`);

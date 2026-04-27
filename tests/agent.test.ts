@@ -18,6 +18,10 @@ describe("detectPlatform", () => {
     ["https://github.com/foo/bar/pull/42", "github"],
     ["https://gitlab.com/foo/bar/-/merge_requests/3", "gitlab"],
     ["https://gitlab.example.dev/group/repo/-/merge_requests/19", "gitlab"],
+    ["https://gitea.example.com/foo/bar/pulls/5", "gitea"],
+    ["https://codeberg.org/foo/bar/pulls/10", "gitea"],
+    ["https://forgejo.example.org/foo/bar/pulls/1", "gitea"],
+    ["https://code.mycompany.com/team/project/pulls/77", "gitea"],
   ] as const)("detects platform for %s", (url, expected) => {
     expect(detectPlatform(url)).toBe(expected);
   });
@@ -48,6 +52,22 @@ describe("parsePrUrl", () => {
     expect(result.host).toBe("gitlab.example.com");
   });
 
+  it("parses Gitea PR URL", () => {
+    const result = parsePrUrl("https://gitea.example.com/acme/widget/pulls/42");
+    expect(result.owner).toBe("acme");
+    expect(result.repo).toBe("widget");
+    expect(result.prNumber).toBe(42);
+    expect(result.host).toBe("gitea.example.com");
+  });
+
+  it("parses Codeberg PR URL", () => {
+    const result = parsePrUrl("https://codeberg.org/user/repo/pulls/7");
+    expect(result.owner).toBe("user");
+    expect(result.repo).toBe("repo");
+    expect(result.prNumber).toBe(7);
+    expect(result.host).toBe("codeberg.org");
+  });
+
   it("throws on invalid URL", () => {
     expect(() => parsePrUrl("https://gitlab.com/foo/bar/issues/1")).toThrow();
   });
@@ -62,6 +82,12 @@ describe("parsePrUrl", () => {
     expect(() =>
       parsePrUrl("https://gitlab.com/foo/bar/-/merge_requests/xyz"),
     ).toThrow(/Invalid MR number/);
+  });
+
+  it("throws on non-numeric Gitea PR number", () => {
+    expect(() =>
+      parsePrUrl("https://gitea.example.com/foo/bar/pulls/abc"),
+    ).toThrow(/Invalid PR number/);
   });
 });
 
