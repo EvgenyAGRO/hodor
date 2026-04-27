@@ -9,7 +9,11 @@ const SAMPLE_PR = {
   state: "open",
   changed_files: 3,
   user: { login: "alice", full_name: "Alice Smith" },
-  head: { ref: "fix/login-redirect", label: "alice:fix/login-redirect" },
+  head: {
+    ref: "fix/login-redirect",
+    label: "alice:fix/login-redirect",
+    repo: { clone_url: "https://gitea.example.com/alice/widget.git" },
+  },
   base: { ref: "main", label: "acme:main" },
   labels: [{ name: "bug" }, { name: "auth" }],
 };
@@ -115,20 +119,22 @@ describe("gitea module", () => {
       expect(notes[0].system).toBe(false);
     });
 
-    it("returns all comments in single fetch (no pagination)", async () => {
+    it("fetches additional comment pages when a page is full", async () => {
       const manyComments = Array.from({ length: 100 }, (_, i) => ({
         body: `Comment ${i}`,
         user: { login: "user", full_name: "User" },
         created_at: "2025-03-20T10:00:00Z",
       }));
 
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => manyComments });
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => manyComments })
+        .mockResolvedValueOnce({ ok: true, json: async () => [] });
 
       const { fetchGiteaPrComments } = await import("../src/gitea.js");
       const notes = await fetchGiteaPrComments("acme", "widget", 42, "gitea.example.com");
 
       expect(notes).toHaveLength(100);
-      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
     it("handles empty comments", async () => {
@@ -142,6 +148,21 @@ describe("gitea module", () => {
 
       expect(notes).toHaveLength(0);
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("fetchGiteaPrCheckoutInfo", () => {
+    it("returns source branch, target branch, and fork clone URL", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => SAMPLE_PR });
+
+      const { fetchGiteaPrCheckoutInfo } = await import("../src/gitea.js");
+      const info = await fetchGiteaPrCheckoutInfo("acme", "widget", 42, "gitea.example.com");
+
+      expect(info).toEqual({
+        sourceBranch: "fix/login-redirect",
+        targetBranch: "main",
+        sourceCloneUrl: "https://gitea.example.com/alice/widget.git",
+      });
     });
   });
 

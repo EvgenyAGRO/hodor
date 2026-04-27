@@ -29,6 +29,9 @@ export AWS_PROFILE=default        # AWS Bedrock (no API key needed)
 # For posting reviews as comments
 gh auth login                     # GitHub
 glab auth login                   # GitLab
+
+# For Gitea/Forgejo private repos or posting comments
+export GITEA_TOKEN=your-token     # or FORGEJO_TOKEN
 ```
 
 ## Usage
@@ -39,6 +42,9 @@ npx @mrkaran/hodor https://github.com/owner/repo/pull/123
 
 # Review a GitLab MR (including self-hosted)
 npx @mrkaran/hodor https://gitlab.example.com/org/project/-/merge_requests/42
+
+# Review a Gitea or Forgejo PR
+npx @mrkaran/hodor https://git.example.com/owner/repo/pulls/123
 
 # Post the review as a PR/MR comment
 npx @mrkaran/hodor <PR_URL> --post
@@ -112,8 +118,27 @@ Local mode:
 | `ANTHROPIC_API_KEY` | Claude API key |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `LLM_API_KEY` | Generic fallback (when provider-specific key is not set) |
-| `GITHUB_TOKEN` / `GITLAB_TOKEN` | Post comments to PRs/MRs (with `--post`) |
+| `GITHUB_TOKEN` / `GITLAB_TOKEN` | Post comments to GitHub PRs / GitLab MRs (with `--post`) |
+| `GITEA_TOKEN` / `FORGEJO_TOKEN` | Read private repos and post comments on Gitea/Forgejo PRs |
+| `GITEA_HOST` / `FORGEJO_HOST` | Hostname for Gitea/Forgejo when not inferable from a full PR URL |
 | `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` | AWS Bedrock auth (no API key needed) |
+
+## Gitea / Forgejo
+
+Hodor supports Gitea and Forgejo pull request URLs in this format:
+
+```bash
+npx @mrkaran/hodor https://git.example.com/owner/repo/pulls/123
+```
+
+For public repositories, metadata fetching may work without a token. Set `GITEA_TOKEN` or `FORGEJO_TOKEN` for private repositories, higher API limits, and `--post`:
+
+```bash
+export GITEA_TOKEN=your-token
+npx @mrkaran/hodor https://git.example.com/owner/repo/pulls/123 --post
+```
+
+Fork PRs are checked out from the PR source repository when Gitea exposes the source clone URL. If the source branch or fork has been deleted, checkout will fail with a workspace error.
 
 ## CI/CD
 

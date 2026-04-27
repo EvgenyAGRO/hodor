@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { exec, execJson } from "./utils/exec.js";
 import { logger } from "./utils/logger.js";
 import { fetchGitlabMrInfo } from "./gitlab.js";
-import { fetchGiteaPrInfo } from "./gitea.js";
+import { fetchGiteaPrCheckoutInfo } from "./gitea.js";
+import type { GiteaPrCheckoutInfo } from "./gitea.js";
 import type { MrMetadata, Platform } from "./types.js";
 
 export class WorkspaceError extends Error {
@@ -285,31 +286,57 @@ async function cloneAndCheckoutGitlabMr(
 // Gitea helpers
 // ---------------------------------------------------------------------------
 
-async function getGiteaPrBranches(
+function normalizeGiteaBaseUrl(host?: string): string {
+  const giteaHost = host || process.env.GITEA_HOST || process.env.FORGEJO_HOST;
+  if (!giteaHost) {
+    throw new WorkspaceError("No Gitea/Forgejo host configured. Set GITEA_HOST or FORGEJO_HOST.");
+  }
+  const trimmed = giteaHost.trim().replace(/\/+$/, "");
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    return trimmed;
+  }
+  return `https://${trimmed}`;
+}
+
+function giteaGitArgs(args: string[]): string[] {
+  const token = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN;
+  return token ? ["-c", `http.extraHeader=Authorization: token ${token}`, ...args] : args;
+}
+
+async function getGiteaPrCheckoutInfo(
   owner: string,
   repo: string,
   prNumber: string,
   host?: string,
-): Promise<{ sourceBranch: string; targetBranch: string }> {
-  let prInfo: MrMetadata;
+): Promise<GiteaPrCheckoutInfo> {
   try {
-    prInfo = await fetchGiteaPrInfo(owner, repo, Number(prNumber), host);
+    return await fetchGiteaPrCheckoutInfo(owner, repo, Number(prNumber), host);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new WorkspaceError(`Failed to fetch PR info for #${prNumber}: ${msg}`);
   }
-
-  const sourceBranch = prInfo.source_branch;
-  if (!sourceBranch) {
-    throw new WorkspaceError(`Could not determine source branch for PR #${prNumber}`);
-  }
-
-  return { sourceBranch, targetBranch: prInfo.target_branch ?? "main" };
 }
 
-async function checkoutGiteaBranch(workspace: string, sourceBranch: string): Promise<void> {
+async function checkoutGiteaBranch(
+  workspace: string,
+  prNumber: string,
+  checkoutInfo: GiteaPrCheckoutInfo,
+): Promise<void> {
+  const { sourceBranch, sourceCloneUrl } = checkoutInfo;
+  const localBranch = `hodor-pr-${prNumber}`;
+
+  if (sourceCloneUrl) {
+    try {
+      await exec("git", giteaGitArgs(["fetch", sourceCloneUrl, sourceBranch]), { cwd: workspace });
+      await exec("git", ["checkout", "-B", localBranch, "FETCH_HEAD"], { cwd: workspace });
+      return;
+    } catch (err) {
+      logger.warn(`Failed to fetch Gitea PR branch from source repo, falling back to origin: ${err}`);
+    }
+  }
+
   try {
-    await exec("git", ["checkout", "-b", sourceBranch, `origin/${sourceBranch}`], {
+    await exec("git", ["checkout", "-B", localBranch, `origin/${sourceBranch}`], {
       cwd: workspace,
     });
   } catch {
@@ -330,13 +357,13 @@ async function fetchAndCheckoutGiteaPr(
   host?: string,
 ): Promise<string> {
   logger.info(`Fetching and checking out PR #${prNumber} in existing workspace`);
-  await exec("git", ["fetch", "origin"], { cwd: workspace });
+  await exec("git", giteaGitArgs(["fetch", "origin"]), { cwd: workspace });
 
-  const { sourceBranch, targetBranch } = await getGiteaPrBranches(owner, repo, prNumber, host);
-  logger.info(`Source branch: ${sourceBranch}, Target branch: ${targetBranch}`);
-  await checkoutGiteaBranch(workspace, sourceBranch);
+  const checkoutInfo = await getGiteaPrCheckoutInfo(owner, repo, prNumber, host);
+  logger.info(`Source branch: ${checkoutInfo.sourceBranch}, Target branch: ${checkoutInfo.targetBranch}`);
+  await checkoutGiteaBranch(workspace, prNumber, checkoutInfo);
 
-  return targetBranch;
+  return checkoutInfo.targetBranch;
 }
 
 async function cloneAndCheckoutGiteaPr(
@@ -346,31 +373,23 @@ async function cloneAndCheckoutGiteaPr(
   prNumber: string,
   host?: string,
 ): Promise<string> {
-  const giteaHost = host || process.env.GITEA_HOST || process.env.FORGEJO_HOST;
-  if (!giteaHost) {
-    throw new WorkspaceError("No Gitea/Forgejo host configured. Set GITEA_HOST or FORGEJO_HOST.");
-  }
   logger.info(`Setting up Gitea workspace for ${owner}/${repo}/pulls/${prNumber}`);
 
-  const token = process.env.GITEA_TOKEN || process.env.FORGEJO_TOKEN;
-  const cloneUrl = `https://${giteaHost}/${owner}/${repo}.git`;
+  const cloneUrl = `${normalizeGiteaBaseUrl(host)}/${owner}/${repo}.git`;
   logger.info(`Cloning from ${cloneUrl}...`);
 
   try {
-    const cloneArgs = token
-      ? ["-c", `http.extraHeader=Authorization: token ${token}`, "clone", cloneUrl, workspace]
-      : ["clone", cloneUrl, workspace];
-    await exec("git", cloneArgs);
+    await exec("git", giteaGitArgs(["clone", cloneUrl, workspace]));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new WorkspaceError(`Failed to clone ${owner}/${repo}: ${msg}`);
   }
 
-  const { sourceBranch, targetBranch } = await getGiteaPrBranches(owner, repo, prNumber, host);
-  logger.info(`Source branch: ${sourceBranch}, Target branch: ${targetBranch}`);
-  await checkoutGiteaBranch(workspace, sourceBranch);
+  const checkoutInfo = await getGiteaPrCheckoutInfo(owner, repo, prNumber, host);
+  logger.info(`Source branch: ${checkoutInfo.sourceBranch}, Target branch: ${checkoutInfo.targetBranch}`);
+  await checkoutGiteaBranch(workspace, prNumber, checkoutInfo);
 
-  return targetBranch;
+  return checkoutInfo.targetBranch;
 }
 
 // ---------------------------------------------------------------------------

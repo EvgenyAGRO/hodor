@@ -1,6 +1,12 @@
 import { logger } from "./utils/logger.js";
 import type { MrMetadata, NoteEntry } from "./types.js";
 
+export interface GiteaPrCheckoutInfo {
+  sourceBranch: string;
+  targetBranch: string;
+  sourceCloneUrl?: string;
+}
+
 export class GiteaAPIError extends Error {
   constructor(message: string) {
     super(message);
@@ -41,7 +47,7 @@ function requireGiteaToken(): string {
 }
 
 async function giteaFetch<T>(
-  host: string,
+  host: string | null | undefined,
   path: string,
   options?: { method?: string; body?: unknown },
 ): Promise<T> {
@@ -99,7 +105,7 @@ export async function fetchGiteaPrInfo(
   let prData: Record<string, unknown>;
   try {
     prData = await giteaFetch<Record<string, unknown>>(
-      host ?? null,
+      host,
       `repos/${owner}/${repo}/pulls/${prNumber}`,
     );
   } catch (err) {
@@ -139,9 +145,37 @@ export async function fetchGiteaPrInfo(
 }
 
 /**
+ * Fetch the PR branch metadata needed to checkout same-repo and fork PRs.
+ */
+export async function fetchGiteaPrCheckoutInfo(
+  owner: string,
+  repo: string,
+  prNumber: number | string,
+  host?: string | null,
+): Promise<GiteaPrCheckoutInfo> {
+  const prData = await giteaFetch<Record<string, unknown>>(
+    host,
+    `repos/${owner}/${repo}/pulls/${prNumber}`,
+  );
+  const head = (prData.head as Record<string, unknown>) ?? {};
+  const base = (prData.base as Record<string, unknown>) ?? {};
+  const headRepo = (head.repo as Record<string, unknown> | null) ?? null;
+  const sourceBranch = head.ref as string | undefined;
+
+  if (!sourceBranch) {
+    throw new GiteaAPIError(`Could not determine source branch for PR #${prNumber}`);
+  }
+
+  return {
+    sourceBranch,
+    targetBranch: (base.ref as string | undefined) ?? "main",
+    sourceCloneUrl: headRepo?.clone_url as string | undefined,
+  };
+}
+
+/**
  * Fetch comments on a Gitea/Forgejo pull request.
  * PRs are a superset of issues in Gitea, so comments use the issues endpoint.
- * Note: This endpoint returns all comments in a single response (pagination params are ignored).
  */
 export async function fetchGiteaPrComments(
   owner: string,
@@ -149,10 +183,17 @@ export async function fetchGiteaPrComments(
   prNumber: number | string,
   host?: string | null,
 ): Promise<NoteEntry[]> {
-  const comments = await giteaFetch<Array<Record<string, unknown>>>(
-    host ?? null,
-    `repos/${owner}/${repo}/issues/${prNumber}/comments`,
-  );
+  const comments: Array<Record<string, unknown>> = [];
+  const pageSize = 100;
+
+  for (let page = 1; ; page++) {
+    const batch = await giteaFetch<Array<Record<string, unknown>>>(
+      host,
+      `repos/${owner}/${repo}/issues/${prNumber}/comments?page=${page}&limit=${pageSize}`,
+    );
+    comments.push(...batch);
+    if (batch.length < pageSize) break;
+  }
 
   return comments.map((c) => {
     const user = (c.user as Record<string, string>) ?? {};
@@ -183,7 +224,7 @@ export async function postGiteaPrComment(
 
   try {
     await giteaFetch<unknown>(
-      host ?? null,
+      host,
       `repos/${owner}/${repo}/issues/${prNumber}/comments`,
       { method: "POST", body: { body } },
     );
