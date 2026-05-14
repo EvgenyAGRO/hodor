@@ -32,52 +32,65 @@ interface CiWorkspace {
   diffBaseSha: string | null;
 }
 
-function detectCiWorkspace(owner: string, repo: string): CiWorkspace {
+function envOrNull(name: string): string | null {
+  const value = process.env[name]?.trim();
+  return value ? value : null;
+}
+
+async function detectCiWorkspace(owner: string, repo: string): Promise<CiWorkspace> {
+  const expected = `${owner}/${repo}`;
+
   // GitLab CI
   if (process.env.GITLAB_CI === "true") {
-    const projectDir = process.env.CI_PROJECT_DIR;
-    const projectPath = process.env.CI_PROJECT_PATH;
-    const targetBranch = process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME ?? null;
-    const diffBaseSha = process.env.CI_MERGE_REQUEST_DIFF_BASE_SHA ?? null;
+    const projectDir = envOrNull("CI_PROJECT_DIR");
+    const projectPath = envOrNull("CI_PROJECT_PATH");
+    const targetBranch = envOrNull("CI_MERGE_REQUEST_TARGET_BRANCH_NAME");
+    const diffBaseSha = envOrNull("CI_MERGE_REQUEST_DIFF_BASE_SHA");
 
-    if (projectDir && projectPath) {
-      const expected = `${owner}/${repo}`;
-      if (projectPath === expected || projectPath.endsWith(`/${expected}`)) {
+    if (projectDir && projectPath && (projectPath === expected || projectPath.endsWith(`/${expected}`))) {
+      if (await isSameRepo(projectDir, owner, repo)) {
         logger.info(`Detected GitLab CI environment (target: ${targetBranch ?? "unknown"})`);
         return { path: projectDir, targetBranch, diffBaseSha };
       }
+      logger.warn(
+        `Detected GitLab CI for ${projectPath}, but ${projectDir} is not a git checkout of ${expected}; falling back to clone`,
+      );
     }
   }
 
   // Gitea Actions / Forgejo Actions
   // Must check BEFORE GITHUB_ACTIONS since Gitea/Forgejo Actions sets GITHUB_ACTIONS=true for compat
   if (process.env.GITEA_ACTIONS === "true" || process.env.FORGEJO_ACTIONS === "true") {
-    const workspaceDir = process.env.GITHUB_WORKSPACE;
-    const repository = process.env.GITHUB_REPOSITORY;
-    const baseRef = process.env.GITHUB_BASE_REF ?? null;
+    const workspaceDir = envOrNull("GITHUB_WORKSPACE");
+    const repository = envOrNull("GITHUB_REPOSITORY");
+    const baseRef = envOrNull("GITHUB_BASE_REF");
 
-    if (workspaceDir && repository) {
-      const expected = `${owner}/${repo}`;
-      if (repository === expected) {
-        const ciType = process.env.FORGEJO_ACTIONS ? "Forgejo" : "Gitea";
+    if (workspaceDir && repository === expected) {
+      const ciType = process.env.FORGEJO_ACTIONS ? "Forgejo" : "Gitea";
+      if (await isSameRepo(workspaceDir, owner, repo)) {
         logger.info(`Detected ${ciType} Actions environment (base: ${baseRef ?? "unknown"})`);
         return { path: workspaceDir, targetBranch: baseRef, diffBaseSha: null };
       }
+      logger.warn(
+        `Detected ${ciType} Actions for ${repository}, but ${workspaceDir} is not a git checkout of ${expected}; falling back to clone`,
+      );
     }
   }
 
   // GitHub Actions
   if (process.env.GITHUB_ACTIONS === "true") {
-    const workspaceDir = process.env.GITHUB_WORKSPACE;
-    const repository = process.env.GITHUB_REPOSITORY;
-    const baseRef = process.env.GITHUB_BASE_REF ?? null;
+    const workspaceDir = envOrNull("GITHUB_WORKSPACE");
+    const repository = envOrNull("GITHUB_REPOSITORY");
+    const baseRef = envOrNull("GITHUB_BASE_REF");
 
-    if (workspaceDir && repository) {
-      const expected = `${owner}/${repo}`;
-      if (repository === expected) {
+    if (workspaceDir && repository === expected) {
+      if (await isSameRepo(workspaceDir, owner, repo)) {
         logger.info(`Detected GitHub Actions environment (base: ${baseRef ?? "unknown"})`);
         return { path: workspaceDir, targetBranch: baseRef, diffBaseSha: null };
       }
+      logger.warn(
+        `Detected GitHub Actions for ${repository}, but ${workspaceDir} is not a git checkout of ${expected}; falling back to clone`,
+      );
     }
   }
 
@@ -87,6 +100,24 @@ function detectCiWorkspace(owner: string, repo: string): CiWorkspace {
 // ---------------------------------------------------------------------------
 // Repo identity check
 // ---------------------------------------------------------------------------
+
+function normalizeGitRemotePath(remoteUrl: string): string {
+  const trimmed = remoteUrl.trim().replace(/\.git$/, "");
+
+  try {
+    const url = new URL(trimmed);
+    return url.pathname.replace(/^\/+/, "").replace(/\.git$/, "");
+  } catch {
+    // Not a URL; try common SSH/scp-like forms below.
+  }
+
+  const scpLikeMatch = trimmed.match(/^[^@\s]+@[^:\s]+:(.+)$/);
+  if (scpLikeMatch) {
+    return scpLikeMatch[1].replace(/^\/+/, "").replace(/\.git$/, "");
+  }
+
+  return trimmed.replace(/^\/+/, "").replace(/\.git$/, "");
+}
 
 /**
  * Check if workspace is already cloned from the expected owner/repo.
@@ -100,13 +131,9 @@ async function isSameRepo(
   try {
     const { stdout } = await exec("git", ["remote", "get-url", "origin"], { cwd: workspace });
     const remoteUrl = stdout.trim();
-    // Normalize: extract path from HTTPS or SSH URLs
-    // HTTPS: https://host/owner/repo.git  SSH: git@host:owner/repo.git
-    const match = remoteUrl.match(/[/:]([\w.\-\/]+?)(?:\.git)?$/) ;
-    if (!match) return false;
-    const remotePath = match[1];
-    const expectedPath = `${owner}/${repo}`;
-    return remotePath === expectedPath;
+    const expectedPath = `${owner}/${repo}`.replace(/\.git$/, "");
+    const remotePath = normalizeGitRemotePath(remoteUrl);
+    return remotePath === expectedPath || remotePath.toLowerCase() === expectedPath.toLowerCase();
   } catch {
     return false;
   }
@@ -408,7 +435,7 @@ export async function setupWorkspace(opts: {
   const { platform, owner, repo, prNumber, host, workingDir, reuse = true } = opts;
 
   try {
-    const ci = detectCiWorkspace(owner, repo);
+    const ci = await detectCiWorkspace(owner, repo);
     let detectedTargetBranch = ci.targetBranch;
     const detectedDiffBaseSha = ci.diffBaseSha;
 
@@ -417,6 +444,9 @@ export async function setupWorkspace(opts: {
 
     if (ci.path) {
       workspace = ci.path;
+      if (platform === "github" && !detectedTargetBranch) {
+        detectedTargetBranch = await getGithubBaseBranch(workspace, prNumber);
+      }
     } else if (!workingDir) {
       workspace = await mkdtemp(join(tmpdir(), "hodor-review-"));
       isTemporary = true;
