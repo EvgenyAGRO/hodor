@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { AgentSession, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { logger } from "./utils/logger.js";
 import { exec } from "./utils/exec.js";
 import {
@@ -27,7 +27,11 @@ import {
 import type { DiffRefs } from "./gitlab.js";
 import { setupWorkspace, cleanupWorkspace } from "./workspace.js";
 import { buildPrReviewPrompt } from "./prompt.js";
-import { parseModelString, mapReasoningEffort } from "./model.js";
+import {
+  getDefaultReasoningEffortForModel,
+  mapReasoningEffort,
+  parseModelString,
+} from "./model.js";
 import { formatMetricsMarkdown, printMetrics } from "./metrics.js";
 import { SUBMIT_REVIEW_SCHEMA, validateReviewOutput } from "./review.js";
 import { REVIEW_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -243,6 +247,65 @@ export async function postReviewComment(opts: {
     logger.error(`Failed to post comment: ${msg}`);
     return { success: false, error: msg };
   }
+}
+
+const HODOR_REVIEW_SHA_RE = /^\s*<!--\s*hodor:sha:([a-f0-9]{40})\s*-->/i;
+
+export function getHodorReviewShaCandidates(notes: MrMetadata["Notes"] | undefined | null): string[] {
+  if (!notes || notes.length === 0) return [];
+
+  const candidates: Array<{ sha: string; createdAtMs: number | null; index: number }> = [];
+  for (const [index, note] of notes.entries()) {
+    const match = note.body?.match(HODOR_REVIEW_SHA_RE);
+    if (!match) continue;
+
+    const createdAtMs = Date.parse(note.created_at ?? "");
+    candidates.push({
+      sha: match[1],
+      createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : null,
+      index,
+    });
+  }
+
+  candidates.sort((a, b) => {
+    if (a.createdAtMs != null && b.createdAtMs != null && a.createdAtMs !== b.createdAtMs) {
+      return b.createdAtMs - a.createdAtMs;
+    }
+    if (a.createdAtMs != null && b.createdAtMs == null) return -1;
+    if (a.createdAtMs == null && b.createdAtMs != null) return 1;
+    return a.index - b.index;
+  });
+
+  const seen = new Set<string>();
+  const shas: string[] = [];
+  for (const { sha } of candidates) {
+    if (seen.has(sha)) continue;
+    seen.add(sha);
+    shas.push(sha);
+  }
+  return shas;
+}
+
+async function findLatestValidReviewSha(
+  notes: MrMetadata["Notes"] | undefined | null,
+  workspacePath: string,
+): Promise<string | null> {
+  const candidates = getHodorReviewShaCandidates(notes);
+  if (candidates.length === 0) return null;
+
+  logger.info(`Found ${candidates.length} previous Hodor review marker(s)`);
+  for (const sha of candidates) {
+    try {
+      const { stdout: objType } = await exec("git", ["cat-file", "-t", sha], { cwd: workspacePath });
+      if (objType.trim() !== "commit") throw new Error("not a commit");
+      await exec("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: workspacePath });
+      return sha;
+    } catch {
+      logger.info(`Skipping previous review SHA ${sha.slice(0, 8)}; not a valid ancestor of HEAD`);
+    }
+  }
+
+  return null;
 }
 
 export async function postReviewStructured(opts: {
@@ -477,6 +540,34 @@ export async function postReviewStructured(opts: {
   };
 }
 
+// Paths that waste context without contributing reviewable logic.
+const DIFF_SKIP_PATTERNS: RegExp[] = [
+  /(?:^|\/)testdata\//,                                         // test fixture directories
+  /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|go\.sum|Cargo\.lock|poetry\.lock|Gemfile\.lock|composer\.lock)$/,
+  /\.mdx?$/,                                                    // markdown docs
+];
+
+export function filterEmbeddedDiff(rawDiff: string): { filtered: string; skippedFiles: string[] } {
+  const skippedFiles: string[] = [];
+  // Each file section starts with "diff --git a/". Split while preserving the delimiter.
+  const sections = rawDiff.split(/(?=^diff --git )/m);
+  const kept: string[] = [];
+  for (const section of sections) {
+    const match = section.match(/^diff --git a\/(.*?) b\//);
+    if (!match) {
+      kept.push(section);
+      continue;
+    }
+    const filePath = match[1];
+    if (DIFF_SKIP_PATTERNS.some((re) => re.test(filePath))) {
+      skippedFiles.push(filePath);
+    } else {
+      kept.push(section);
+    }
+  }
+  return { filtered: kept.join(""), skippedFiles };
+}
+
 export async function reviewPr(opts: {
   prUrl?: string;
   model?: string;
@@ -524,7 +615,6 @@ export async function reviewPr(opts: {
 
   // --- Preflight: validate model + credentials before any expensive I/O ---
   const parsed = parseModelString(model);
-  const thinkingLevel = mapReasoningEffort(reasoningEffort);
 
   // Snapshot env vars we may mutate, restore in finally block.
   const envSnapshot: Record<string, string | undefined> = {
@@ -539,19 +629,15 @@ export async function reviewPr(opts: {
     ModelRegistry,
     SessionManager,
     SettingsManager,
-    createReadTool,
-    createBashTool,
-    createGrepTool,
-    createFindTool,
-    createLsTool,
-  } = await import("@mariozechner/pi-coding-agent");
+    getAgentDir,
+  } = await import("@earendil-works/pi-coding-agent");
 
   // In-memory auth storage avoids loading ~/.pi/auth.json — env vars only.
   const authStorage = AuthStorage.inMemory();
   if (process.env.LLM_API_KEY) {
     authStorage.setRuntimeApiKey(parsed.provider, process.env.LLM_API_KEY);
   }
-  const modelRegistry = new ModelRegistry(authStorage);
+  const modelRegistry = ModelRegistry.inMemory(authStorage);
 
   // Resolve model — use registry for known models, construct manually for custom ARNs
   let piModel: Model<Api>;
@@ -600,6 +686,11 @@ export async function reviewPr(opts: {
         `Unsupported model "${model}". Provider "${parsed.provider}" is recognized by pi-ai, but model "${parsed.modelId}" was not found in the installed registry.`,
       );
     }
+  }
+  const thinkingLevel =
+    mapReasoningEffort(reasoningEffort) ?? getDefaultReasoningEffortForModel(piModel);
+  if (!reasoningEffort && thinkingLevel) {
+    logger.info(`Default reasoning effort for ${piModel.name}: ${thinkingLevel}`);
   }
 
   // Note: For bedrock, don't preflight-check AWS credentials because the SDK
@@ -650,6 +741,8 @@ export async function reviewPr(opts: {
     isTemporary = wsResult.isTemporary;
   }
 
+  let activeSession: AgentSession | undefined;
+
   try {
     let mrMetadata: MrMetadata | null = null;
     if (!localMode && platform === "gitlab") {
@@ -677,27 +770,12 @@ export async function reviewPr(opts: {
       }
     }
 
-    // Detect previous hodor review SHA for incremental mode
-    let previousReviewSha: string | null = null;
-    if (mrMetadata?.Notes) {
-      for (const note of mrMetadata.Notes) {
-        const match = note.body?.match(/<!-- hodor:sha:([a-f0-9]{40}) -->/);
-        if (match) {
-          previousReviewSha = match[1]; // take the last (most recent) match
-        }
-      }
-    }
+    // Detect previous Hodor review SHA for incremental mode. GitLab returns MR
+    // notes newest-first by default, so select by timestamp instead of taking
+    // the last match from API order.
+    const previousReviewSha = await findLatestValidReviewSha(mrMetadata?.Notes, workspacePath);
     if (previousReviewSha) {
-      try {
-        // Verify it's a commit (not a blob/tree) and is an ancestor of HEAD
-        const { stdout: objType } = await exec("git", ["cat-file", "-t", previousReviewSha], { cwd: workspacePath });
-        if (objType.trim() !== "commit") throw new Error("not a commit");
-        await exec("git", ["merge-base", "--is-ancestor", previousReviewSha, "HEAD"], { cwd: workspacePath });
-        logger.info(`Incremental mode: previous review at ${previousReviewSha.slice(0, 8)}`);
-      } catch {
-        logger.info(`Previous review SHA ${previousReviewSha.slice(0, 8)} not valid ancestor of HEAD, doing full review`);
-        previousReviewSha = null;
-      }
+      logger.info(`Incremental mode: previous review at ${previousReviewSha.slice(0, 8)}`);
     }
 
     // Get HEAD SHA for embedding in posted comments (skip in local mode — no posting)
@@ -719,11 +797,15 @@ export async function reviewPr(opts: {
             ? ["--no-pager", "diff", targetBranch]  // includes uncommitted changes
             : ["--no-pager", "diff", `origin/${targetBranch}...HEAD`];
       const { stdout: rawDiff } = await exec("git", diffArgs, { cwd: workspacePath });
-      if (Buffer.byteLength(rawDiff, "utf-8") <= MAX_EMBED_BYTES) {
-        embeddedDiff = rawDiff;
-        logger.info(`Embedding diff in prompt (${Buffer.byteLength(rawDiff, "utf-8")} bytes)`);
+      const { filtered: filteredDiff, skippedFiles } = filterEmbeddedDiff(rawDiff);
+      if (skippedFiles.length > 0) {
+        logger.info(`Filtered ${skippedFiles.length} file(s) from embedded diff: ${skippedFiles.join(", ")}`);
+      }
+      if (Buffer.byteLength(filteredDiff, "utf-8") <= MAX_EMBED_BYTES) {
+        embeddedDiff = filteredDiff;
+        logger.info(`Embedding diff in prompt (${Buffer.byteLength(filteredDiff, "utf-8")} bytes, raw: ${Buffer.byteLength(rawDiff, "utf-8")} bytes)`);
       } else {
-        logger.info(`Diff too large to embed (${Buffer.byteLength(rawDiff, "utf-8")} bytes), using command mode`);
+        logger.info(`Diff too large to embed (${Buffer.byteLength(filteredDiff, "utf-8")} bytes filtered, ${Buffer.byteLength(rawDiff, "utf-8")} bytes raw), using command mode`);
       }
     } catch (err) {
       logger.warn(`Failed to pre-fetch diff, falling back to command mode: ${err}`);
@@ -747,15 +829,14 @@ export async function reviewPr(opts: {
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: true },
     });
-    const skillPaths = [
-      join(workspacePath, ".pi", "skills"),
-      join(workspacePath, ".hodor", "skills"),
-    ].filter((p) => existsSync(p));
+    const skillPaths = [join(workspacePath, ".agents", "skills")]
+      .filter((p) => existsSync(p));
     const resourceLoader = new DefaultResourceLoader({
       cwd: workspacePath,
+      agentDir: getAgentDir(),
       settingsManager,
       systemPrompt: REVIEW_SYSTEM_PROMPT,
-      appendSystemPrompt: "",
+      appendSystemPrompt: [],
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,
@@ -807,6 +888,7 @@ export async function reviewPr(opts: {
             text: "Review received. Do not output the review as normal text.",
           }],
           details: {},
+          terminate: true,
         };
       },
     };
@@ -815,13 +897,11 @@ export async function reviewPr(opts: {
       cwd: workspacePath,
       model: piModel,
       thinkingLevel,
-      tools: [
-        createReadTool(workspacePath),
-        createBashTool(workspacePath),
-        createGrepTool(workspacePath),
-        createFindTool(workspacePath),
-        createLsTool(workspacePath),
-      ],
+      // pi v0.74 filters customTools through the same allowlist as built-ins
+      // (see _refreshToolRegistry in @earendil-works/pi-coding-agent's
+      // agent-session.ts). The submit_review custom tool must be named here
+      // or the LLM never sees it and the agent loop exits without calling it.
+      tools: ["read", "bash", "grep", "find", "ls", "submit_review"],
       customTools: [submitReviewTool],
       authStorage,
       modelRegistry,
@@ -829,9 +909,10 @@ export async function reviewPr(opts: {
       settingsManager,
       resourceLoader,
     });
+    activeSession = session;
 
     // Inject Bedrock cost allocation tags into stream requests
-    if (bedrockTags && parsed.provider === "bedrock") {
+    if (bedrockTags && parsed.provider === "amazon-bedrock") {
       type AgentWithStream = { agent: { streamFn: (...args: unknown[]) => unknown } };
       const agent = (session as unknown as AgentWithStream).agent;
       const originalStreamFn = agent.streamFn;
@@ -934,8 +1015,8 @@ export async function reviewPr(opts: {
     logger.info("Sending prompt to agent...");
     await session.prompt(prompt);
 
-    // Check for agent errors (pi-ai swallows LLM errors into state.error)
-    const agentError = (session as unknown as { state: { error?: string } }).state?.error;
+    // Check for agent errors (pi-agent-core stores failed/aborted assistant turns in state.errorMessage)
+    const agentError = session.state.errorMessage;
     if (agentError) {
       throw new Error(`LLM request failed: ${agentError}`);
     }
@@ -945,8 +1026,7 @@ export async function reviewPr(opts: {
       if (rawText) {
         logger.debug(`Last assistant text without submit_review (first 500 chars): ${rawText.slice(0, 500)}`);
       } else {
-        const messages = (session as unknown as { state: { messages: unknown[] } }).state?.messages;
-        const lastMsg = messages?.[messages.length - 1];
+        const lastMsg = session.messages.at(-1);
         logger.debug(`Last message: ${JSON.stringify(lastMsg)?.slice(0, 500)}`);
       }
       if (submitReviewCalls > 0) {
@@ -980,9 +1060,7 @@ export async function reviewPr(opts: {
       usage?: MsgUsage;
     }
 
-    const allMessages = (
-      session as unknown as { state: { messages: AssistantMsg[] } }
-    ).state?.messages ?? [];
+    const allMessages = session.messages as AssistantMsg[];
 
     let inputTokens = 0;
     let outputTokens = 0;
@@ -1022,6 +1100,8 @@ export async function reviewPr(opts: {
 
     return { review, metricsFooter, headSha, metrics, workspacePath };
   } finally {
+    activeSession?.dispose();
+
     // Restore mutated env vars
     for (const [key, val] of Object.entries(envSnapshot)) {
       if (val === undefined) {
