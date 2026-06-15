@@ -134,6 +134,7 @@ When you are done, call `submit_review` exactly once with the final structured r
         "absolute_file_path": "<absolute file path>",
         "line_range": {"start": <int>, "end": <int>}
       },
+      "existing_code": "<verbatim copy of the exact current source lines this finding covers>",
       "suggestion": "<optional: exact replacement code for the flagged line range>"
     }
   ],
@@ -151,6 +152,7 @@ When you are done, call `submit_review` exactly once with the final structured r
 * If `findings` is non-empty, `overall_correctness` must be `"patch is incorrect"`.
 * If `findings` is empty, `overall_correctness` must be `"patch is correct"`.
 * Every finding must include `title`, `body`, `priority`, and `code_location`.
+* Always include `existing_code`: copy the exact current source lines the finding refers to, verbatim and contiguous, from the file or the diff's context/added lines. Do NOT include diff `+`/`-` markers, line numbers, or markdown fences. These lines are matched mechanically against the file to pinpoint the comment location, so they must be an exact quote covering the same lines as `line_range`.
 * Use absolute file paths (for example, `/workspace/path/to/file.py`) not relative paths.
 * The title must start with a priority tag: `[P0]`, `[P1]`, `[P2]`, or `[P3]`.
 * `overall_correctness` must be exactly `"patch is correct"` or `"patch is incorrect"`.
