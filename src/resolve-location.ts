@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { logger } from "./utils/logger.js";
 import type { ReviewOutput } from "./types.js";
 
@@ -69,6 +70,12 @@ function indexFile(content: string): IndexedLine[] {
     }
   }
   return result;
+}
+
+/** True when `filePath` resolves to a location inside `root` (blocks path traversal). */
+function isWithinWorkspace(root: string, filePath: string): boolean {
+  const target = resolve(filePath);
+  return target === root || target.startsWith(root + sep);
 }
 
 /** All [start,end] ranges (1-indexed, inclusive) where `target` matches a consecutive run. */
@@ -153,7 +160,8 @@ export function resolveLineRange(input: ResolveInput): ResolveResult {
 
 /**
  * Parse a unified diff into a map of file path -> set of new-side line numbers
- * that were added. Used only to disambiguate multiple snippet matches.
+ * within its hunks (added + context lines — both are valid comment anchors).
+ * Used only to disambiguate multiple snippet matches.
  */
 export function parseChangedLines(diffText: string): Map<string, Set<number>> {
   const byFile = new Map<string, Set<number>>();
@@ -191,7 +199,8 @@ export function parseChangedLines(diffText: string): Map<string, Set<number>> {
     } else if (line.startsWith("\\")) {
       // "\ No newline at end of file"
     } else {
-      // context line
+      // context line — part of the hunk's new side, usable as a comment anchor
+      current.add(newLine);
       newLine++;
     }
   }
@@ -212,6 +221,7 @@ export function resolveReviewLocations(
 
   const changedByFile = opts.diffText ? parseChangedLines(opts.diffText) : new Map<string, Set<number>>();
   const fileCache = new Map<string, string | null>();
+  const workspaceRoot = opts.workspacePath ? resolve(opts.workspacePath) : null;
 
   const readFile = (path: string): string | null => {
     if (fileCache.has(path)) return fileCache.get(path) ?? null;
@@ -231,6 +241,17 @@ export function resolveReviewLocations(
     const { existing_code: existingCode, code_location: loc } = finding;
     if (!existingCode) {
       stats.noSnippet++;
+      return finding;
+    }
+
+    // Only resolve against files inside the review workspace. The model supplies
+    // absolute_file_path, so a malformed or injected payload must not be able to
+    // read arbitrary files on disk.
+    if (workspaceRoot && !isWithinWorkspace(workspaceRoot, loc.absolute_file_path)) {
+      stats.unmatched++;
+      logger.warn(
+        `Location resolution: ${loc.absolute_file_path} is outside the workspace for "${finding.title}"; keeping model range`,
+      );
       return finding;
     }
 

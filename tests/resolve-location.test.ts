@@ -107,7 +107,7 @@ describe("resolveLineRange", () => {
 });
 
 describe("parseChangedLines", () => {
-  it("extracts new-side added line numbers per file", () => {
+  it("extracts all new-side hunk lines (added + context) per file", () => {
     const diff = [
       "diff --git a/src/foo.ts b/src/foo.ts",
       "--- a/src/foo.ts",
@@ -122,8 +122,8 @@ describe("parseChangedLines", () => {
     ].join("\n");
     const map = parseChangedLines(diff);
     expect(map.has("src/foo.ts")).toBe(true);
-    // new lines: 1 ctx, 2 added, 3 ctx, 4 added, 5 ctx => added {2,4}
-    expect([...map.get("src/foo.ts")!].sort((a, b) => a - b)).toEqual([2, 4]);
+    // new lines: 1 ctx, 2 added, 3 ctx, 4 added, 5 ctx => {1,2,3,4,5} (deleted line never advances new side)
+    expect([...map.get("src/foo.ts")!].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("ignores deleted files (+++ /dev/null)", () => {
@@ -188,6 +188,29 @@ describe("resolveReviewLocations", () => {
     });
     const { review: out, stats } = resolveReviewLocations(review, { workspacePath: dir, diffText: null });
     expect(out.findings[0].code_location.line_range).toEqual({ start: 3, end: 4 });
+    expect(stats.unmatched).toBe(1);
+  });
+
+  it("refuses to resolve files outside the workspace", () => {
+    const review = makeReview({
+      existing_code: "root:x:0:0",
+      code_location: { absolute_file_path: "/etc/passwd", line_range: { start: 1, end: 1 } },
+    });
+    const { review: out, stats } = resolveReviewLocations(review, { workspacePath: dir, diffText: null });
+    expect(out.findings[0].code_location.line_range).toEqual({ start: 1, end: 1 });
+    expect(stats.unmatched).toBe(1);
+  });
+
+  it("blocks path traversal that escapes the workspace via ..", () => {
+    const review = makeReview({
+      existing_code: "anything",
+      code_location: {
+        absolute_file_path: join(dir, "..", "..", "etc", "passwd"),
+        line_range: { start: 2, end: 2 },
+      },
+    });
+    const { review: out, stats } = resolveReviewLocations(review, { workspacePath: dir, diffText: null });
+    expect(out.findings[0].code_location.line_range).toEqual({ start: 2, end: 2 });
     expect(stats.unmatched).toBe(1);
   });
 
