@@ -13,7 +13,6 @@ import {
   fetchGitlabMrInfo,
   postGitlabMrComment,
   getGitlabMrDiffRefs,
-  cleanupHodorComments,
   createGitlabDraftNote,
   bulkPublishGitlabDraftNotes,
   postGitlabCommitStatus,
@@ -378,18 +377,6 @@ export async function postReviewStructured(opts: {
     }
   } catch (err) {
     logger.warn(`Failed to resolve old discussions: ${err instanceof Error ? err.message : err}`);
-  }
-
-  try {
-    const deleted = await cleanupHodorComments(
-      parsed.owner,
-      parsed.repo,
-      parsed.prNumber,
-      parsed.host,
-    );
-    if (deleted > 0) logger.info(`Cleaned up ${deleted} old Hodor comment(s)`);
-  } catch (err) {
-    logger.warn(`Failed to cleanup old comments: ${err instanceof Error ? err.message : err}`);
   }
 
   let diffRefs: DiffRefs | null = null;
