@@ -37,4 +37,9 @@ jobs:
       - name: Publish to npm
         run: |
           npm --version
-          npm publish --provenance --access public
+          VERSION=$(node -p "require('./package.json').version")
+          TAG_ARGS=""
+          if [[ "$VERSION" == *-* ]]; then
+            TAG_ARGS="--tag rc"
+          fi
+          npm publish --provenance --access public $TAG_ARGS

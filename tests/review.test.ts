@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { validateReviewOutput } from "../src/review.js";
+import { Value } from "@sinclair/typebox/value";
+import { validateReviewOutput, SUBMIT_REVIEW_SCHEMA } from "../src/review.js";
 import type { ReviewOutput } from "../src/types.js";
 
 function makeReview(overrides: Partial<ReviewOutput> = {}): ReviewOutput {
@@ -20,6 +21,24 @@ function makeReview(overrides: Partial<ReviewOutput> = {}): ReviewOutput {
     ...overrides,
   };
 }
+
+describe("SUBMIT_REVIEW_SCHEMA", () => {
+  test("accepts the optional existing_code field", () => {
+    const review = makeReview();
+    review.findings[0].existing_code = "function foo() {\n  return bar;\n}";
+    expect(Value.Check(SUBMIT_REVIEW_SCHEMA, review)).toBe(true);
+  });
+
+  test("accepts findings without existing_code (backward compatible)", () => {
+    expect(Value.Check(SUBMIT_REVIEW_SCHEMA, makeReview())).toBe(true);
+  });
+
+  test("rejects an empty existing_code string", () => {
+    const review = makeReview();
+    review.findings[0].existing_code = "";
+    expect(Value.Check(SUBMIT_REVIEW_SCHEMA, review)).toBe(false);
+  });
+});
 
 describe("validateReviewOutput", () => {
   test("accepts a valid structured review", () => {

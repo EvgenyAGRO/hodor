@@ -13,7 +13,6 @@ import {
   fetchGitlabMrInfo,
   postGitlabMrComment,
   getGitlabMrDiffRefs,
-  cleanupHodorComments,
   createGitlabDraftNote,
   bulkPublishGitlabDraftNotes,
   postGitlabCommitStatus,
@@ -35,6 +34,7 @@ import {
 } from "./model.js";
 import { formatMetricsMarkdown, printMetrics } from "./metrics.js";
 import { SUBMIT_REVIEW_SCHEMA, validateReviewOutput } from "./review.js";
+import { resolveReviewLocations } from "./resolve-location.js";
 import { REVIEW_SYSTEM_PROMPT } from "./system-prompt.js";
 import { renderMarkdown, renderSummaryMarkdown } from "./render.js";
 import { relativizeWorkspacePath } from "./utils/path.js";
@@ -377,18 +377,6 @@ export async function postReviewStructured(opts: {
     }
   } catch (err) {
     logger.warn(`Failed to resolve old discussions: ${err instanceof Error ? err.message : err}`);
-  }
-
-  try {
-    const deleted = await cleanupHodorComments(
-      parsed.owner,
-      parsed.repo,
-      parsed.prNumber,
-      parsed.host,
-    );
-    if (deleted > 0) logger.info(`Cleaned up ${deleted} old Hodor comment(s)`);
-  } catch (err) {
-    logger.warn(`Failed to cleanup old comments: ${err instanceof Error ? err.message : err}`);
   }
 
   let diffRefs: DiffRefs | null = null;
@@ -1172,10 +1160,24 @@ export async function reviewPr(opts: {
       );
     }
 
-    const review = submittedReview as ReviewOutput;
+    const rawReview = submittedReview as ReviewOutput;
     if (submitReviewCalls > 1) {
       logger.warn(`Agent called submit_review ${submitReviewCalls} times; using the first valid submission`);
     }
+
+    // Resolve each finding's line_range from its quoted snippet against the
+    // checked-out file, correcting model line-number errors before posting.
+    const { review, stats: locationStats } = resolveReviewLocations(rawReview, {
+      workspacePath,
+      diffText: embeddedDiff,
+    });
+    if (locationStats.corrected > 0 || locationStats.unmatched > 0) {
+      logger.info(
+        `Location resolution: ${locationStats.corrected} corrected, ${locationStats.confirmed} confirmed, ` +
+          `${locationStats.unmatched} unmatched, ${locationStats.noSnippet} without snippet`,
+      );
+    }
+
     logger.info(
       `Captured ${review.findings.length} finding(s), verdict: ${review.overall_correctness}`,
     );
