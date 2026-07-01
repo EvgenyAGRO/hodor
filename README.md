@@ -57,6 +57,9 @@ npx @mrkaran/hodor <PR_URL> --model bedrock/converse/anthropic.claude-sonnet-4-5
 # Extended reasoning for complex PRs
 npx @mrkaran/hodor <PR_URL> --reasoning-effort high
 
+# Force a full review of the entire branch (ignore previous incremental reviews)
+npx @mrkaran/hodor <PR_URL> --full
+
 # Custom review instructions
 npx @mrkaran/hodor <PR_URL> --prompt "Focus on SQL injection and auth bypasses"
 
@@ -102,6 +105,8 @@ Local mode:
 | `--model` | `anthropic/claude-sonnet-4-5-20250929` | LLM model as `provider/model-id`. Recommended: Anthropic, OpenAI, Bedrock, OpenRouter. Other pi-ai providers (e.g., Mistral, Gemini, xAI, Groq) are best-effort. See [docs/MODELS.md](./docs/MODELS.md). |
 | `--reasoning-effort` | – | Extended thinking: `low`, `medium`, `high` |
 | `--ultrathink` | Off | Maximum reasoning effort |
+| `--full` | Off | Review the entire source-vs-target diff from scratch, ignoring previous hodor reviews (disables incremental mode) |
+| `--target-branch` | – | Override the target branch to diff against under `--full` (default: the PR/MR's target branch) |
 | `--local` | Off | Review local git changes (no PR URL required) |
 | `--diff-against` | `origin/main` | Git ref to diff against in `--local` mode |
 | `--post` | Off | Post review as a comment on the PR/MR |
@@ -226,7 +231,7 @@ See [AUTOMATED_REVIEWS.md](./docs/AUTOMATED_REVIEWS.md) for advanced workflows.
 Hodor automatically optimizes token usage:
 
 - **Diff embedding**: For PRs under 200KB, the diff is embedded directly in the prompt, cutting agent turns from ~60 to ~5.
-- **Incremental reviews**: On re-runs, only reviews changes since the last hodor comment (detected via SHA markers in posted comments).
+- **Incremental reviews**: On re-runs, only reviews changes since the last hodor comment (detected via SHA markers in posted comments). Pass `--full` to override this and re-review the entire source-vs-target diff from scratch.
 - **Compaction**: SDK auto-summarizes older conversation turns when context grows too large.
 
 ## Skills
