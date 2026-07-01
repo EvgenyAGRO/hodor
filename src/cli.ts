@@ -84,6 +84,15 @@ program
     "Git ref to diff against in local mode (e.g., origin/main, HEAD~1)",
     "origin/main",
   )
+  .option(
+    "--full",
+    "Force a full review of the entire source-vs-target diff, ignoring any previous hodor reviews on the MR/PR (disables incremental mode)",
+    false,
+  )
+  .option(
+    "--target-branch <ref>",
+    "Override the target branch to diff against for a full review (default: the MR/PR's target branch). Only used with --full.",
+  )
   .action(async (prUrl: string | undefined, cmdOpts: Record<string, unknown>) => {
     const verbose = cmdOpts.verbose as boolean;
     const post = cmdOpts.post as boolean;
@@ -100,6 +109,8 @@ program
     const prometheusPush = cmdOpts.prometheusPush as string | undefined;
     const localMode = cmdOpts.local as boolean;
     const diffAgainst = cmdOpts.diffAgainst as string;
+    const full = cmdOpts.full as boolean;
+    const targetBranchOverride = cmdOpts.targetBranch as string | undefined;
 
     if (!localMode && !prUrl) {
       console.error(chalk.red("Error: pr-url is required unless --local is specified"));
@@ -112,6 +123,12 @@ program
     if (!["summary", "inline", "hybrid"].includes(reviewStyle ?? "hybrid")) {
       console.error(chalk.red("Error: --review-style must be one of: summary, inline, hybrid"));
       process.exit(1);
+    }
+    if (targetBranchOverride && !full) {
+      console.error(chalk.yellow("Warning: --target-branch is only used with --full; ignoring it."));
+    }
+    if (full && localMode) {
+      console.error(chalk.yellow("Warning: --full has no effect in --local mode (local reviews are always full)."));
     }
 
     // Auto-detect CI environment
@@ -250,6 +267,9 @@ program
       } else {
         log(chalk.dim(`Platform: ${platform.toUpperCase()}`));
         log(chalk.dim(`PR URL: ${prUrl}`));
+        if (full) {
+          log(chalk.dim(`Mode: Full review (source vs ${targetBranchOverride ?? "target branch"}, incremental disabled)`));
+        }
       }
       log(chalk.dim(`Model: ${model}`));
       if (reasoningEffort) {
@@ -271,6 +291,8 @@ program
         bedrockTags,
         localMode,
         diffAgainst,
+        full,
+        targetBranchOverride,
       });
       const reviewText = renderMarkdown(review);
 

@@ -75,6 +75,11 @@ export function parseModelString(model: string): ParsedModel {
  * Map reasoning effort strings to pi-ai thinking levels.
  * Returns undefined for no reasoning.
  */
+// NOTE: There is no "max" thinking level yet. The Anthropic API (Opus 4.7+) and
+// upcoming OpenAI models expose a "max" reasoning tier, but the pi-ai SDK's
+// ThinkingLevel union tops out at "xhigh", so "max" is unreachable from here.
+// Tracked upstream: https://github.com/earendil-works/pi/issues/6097
+// When pi-ai adds "max", add a case below and bump the full-review job to use it.
 export function mapReasoningEffort(
   effort: string | undefined,
 ): ThinkingLevel | undefined {
