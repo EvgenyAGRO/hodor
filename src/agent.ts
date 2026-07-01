@@ -667,6 +667,8 @@ export async function reviewPr(opts: {
   bedrockTags?: Record<string, string> | null;
   localMode?: boolean;
   diffAgainst?: string;
+  full?: boolean;
+  targetBranchOverride?: string;
 }): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null; metrics: ReviewMetrics; workspacePath: string }> {
   const {
     prUrl,
@@ -681,6 +683,8 @@ export async function reviewPr(opts: {
     bedrockTags,
     localMode = false,
     diffAgainst,
+    full = false,
+    targetBranchOverride,
   } = opts;
 
   logger.info(`Starting PR review for: ${localMode ? "local diff" : prUrl}`);
@@ -827,6 +831,27 @@ export async function reviewPr(opts: {
     isTemporary = wsResult.isTemporary;
   }
 
+  // --full with an explicit target overrides the detected base. Drop the CI
+  // merge-base SHA so the diff uses origin/<target>...HEAD against the given ref.
+  // CI clones don't fetch arbitrary branches, so fetch-and-verify the ref first
+  // and fail loudly rather than silently reviewing against a missing base.
+  if (!localMode && full && targetBranchOverride) {
+    logger.info(`Full review: overriding target branch to '${targetBranchOverride}'`);
+    try {
+      await exec("git", ["fetch", "--quiet", "origin", targetBranchOverride], { cwd: workspacePath });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to fetch --target-branch '${targetBranchOverride}' from origin for --full review: ${msg}`);
+    }
+    try {
+      await exec("git", ["rev-parse", "--verify", "--quiet", `origin/${targetBranchOverride}`], { cwd: workspacePath });
+    } catch {
+      throw new Error(`--target-branch 'origin/${targetBranchOverride}' not found after fetch; cannot run --full review against it.`);
+    }
+    targetBranch = targetBranchOverride;
+    diffBaseSha = null;
+  }
+
   let activeSession: AgentSession | undefined;
 
   try {
@@ -858,9 +883,14 @@ export async function reviewPr(opts: {
 
     // Detect previous Hodor review SHA for incremental mode. GitLab returns MR
     // notes newest-first by default, so select by timestamp instead of taking
-    // the last match from API order.
-    const previousReviewSha = await findLatestValidReviewSha(mrMetadata?.Notes, workspacePath);
-    if (previousReviewSha) {
+    // the last match from API order. --full skips this entirely so the review
+    // always covers the whole source-vs-target diff.
+    const previousReviewSha = full
+      ? null
+      : await findLatestValidReviewSha(mrMetadata?.Notes, workspacePath);
+    if (full) {
+      logger.info("Full review mode: ignoring previous hodor reviews, diffing entire source-vs-target range");
+    } else if (previousReviewSha) {
       logger.info(`Incremental mode: previous review at ${previousReviewSha.slice(0, 8)}`);
     }
 
