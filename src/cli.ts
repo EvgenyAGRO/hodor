@@ -404,6 +404,7 @@ program
           log(chalk.bold.red(`Failed to post review: ${result.error}`));
           log(chalk.yellow("\nReview output:\n"));
           console.log(reviewText);
+          process.exitCode = 1;
         }
       } else {
         log(chalk.bold.green("Review Complete\n"));
