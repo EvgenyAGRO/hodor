@@ -1,0 +1,31 @@
+.env.example
+  s_71f46325082e80::t_3fea4591d813a4 14-17
+src/prompt.ts
+  s_71f46325082e80::t_d5ef6f427d13bb 216
+  s_71f46325082e80::t_9add518325a123 25,38
+templates/tool-review.md
+  s_71f46325082e80::t_00c4932fcabb07 15-16
+src/jira.ts
+  s_71f46325082e80::t_6e4617c584c4ea 1-175
+src/agent.ts
+  s_71f46325082e80::t_ce697d495eb806 30
+  s_71f46325082e80::t_fbe8bd42b08fc0 931-938,951
+tests/jira.test.ts
+  s_71f46325082e80::t_997155f3c3be27 1-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "5f6bc7ce9a72b346ad95527438e4f0f37166e122",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
