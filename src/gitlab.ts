@@ -676,6 +676,64 @@ export async function listHodorDiscussions(
   return results;
 }
 
+/**
+ * Fetch every note on an MR (from any author, resolved or not) for duplicate
+ * detection against findings about to be posted — unlike listHodorDiscussions,
+ * this is not filtered to Hodor's own comments, so it also catches a human
+ * reviewer having already raised the same issue.
+ */
+export async function listAllMrNotes(
+  owner: string,
+  repo: string,
+  mrNumber: number | string,
+  host?: string | null,
+): Promise<Array<{ filePath?: string; line?: number; body: string }>> {
+  const encoded = encodedProjectPath(owner, repo);
+  const env = glabEnv(host);
+
+  let discussions: Array<Record<string, unknown>>;
+  try {
+    const { stdout: rawDiscussions } = await exec(
+      "glab",
+      [
+        "api",
+        `projects/${encoded}/merge_requests/${mrNumber}/discussions?per_page=100`,
+        "--paginate",
+      ],
+      { env },
+    );
+    discussions = parseGlabPaginatedJson(rawDiscussions);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new GitLabAPIError(`Failed to list discussions for MR !${mrNumber}: ${msg}`);
+  }
+
+  const results: Array<{ filePath?: string; line?: number; body: string }> = [];
+
+  for (const discussion of discussions) {
+    const notes = discussion.notes;
+    if (!Array.isArray(notes)) continue;
+
+    for (const note of notes) {
+      if (!note || typeof note !== "object") continue;
+      const noteObj = note as Record<string, unknown>;
+      const body = noteObj.body;
+      if (typeof body !== "string") continue;
+
+      const position =
+        noteObj.position && typeof noteObj.position === "object"
+          ? (noteObj.position as Record<string, unknown>)
+          : undefined;
+      const filePath = typeof position?.new_path === "string" ? position.new_path : undefined;
+      const line = typeof position?.new_line === "number" ? position.new_line : undefined;
+
+      results.push({ filePath, line, body });
+    }
+  }
+
+  return results;
+}
+
 export async function resolveGitlabDiscussions(
   owner: string,
   repo: string,

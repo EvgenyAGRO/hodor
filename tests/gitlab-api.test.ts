@@ -113,6 +113,40 @@ describe("GitLab paginated API helpers", () => {
     ]);
   });
 
+  it("listAllMrNotes returns every note regardless of author or marker", async () => {
+    execMock.mockResolvedValueOnce({
+      stdout: JSON.stringify([
+        {
+          id: "discussion-1",
+          notes: [
+            {
+              id: 1,
+              body: "A human reviewer's comment about this line.",
+              resolvable: true,
+              resolved: false,
+              position: { new_path: "src/auth.ts", new_line: 42 },
+            },
+          ],
+        },
+        {
+          id: "discussion-2",
+          notes: [
+            { id: 2, body: "<!-- hodor-review --> a hodor finding", resolvable: true, resolved: true },
+          ],
+        },
+      ]) + "[]",
+      stderr: "",
+    });
+
+    const { listAllMrNotes } = await import("../src/gitlab.js");
+    const result = await listAllMrNotes("acme", "app", 42, "gitlab.example.com");
+
+    expect(result).toEqual([
+      { filePath: "src/auth.ts", line: 42, body: "A human reviewer's comment about this line." },
+      { filePath: undefined, line: undefined, body: "<!-- hodor-review --> a hodor finding" },
+    ]);
+  });
+
   it("cleanupHodorComments ignores notes that merely quote the marker", async () => {
     execMock.mockResolvedValueOnce({
       // First note has the marker mid-body (a human quoting it); should be skipped.
