@@ -22,6 +22,7 @@ export function buildPrReviewPrompt(opts: {
   embeddedDiff?: string | null;
   previousReviewSha?: string | null;
   localMode?: boolean;
+  jiraContext?: string | null;
 }): string {
   const {
     prUrl,
@@ -34,6 +35,7 @@ export function buildPrReviewPrompt(opts: {
     embeddedDiff,
     previousReviewSha,
     localMode = false,
+    jiraContext,
   } = opts;
 
   // Step 1: Determine template (always tool submission; rendered to markdown post-hoc)
@@ -211,6 +213,7 @@ export function buildPrReviewPrompt(opts: {
     .replace(/\{mr_context_section\}/g, contextSection)
     .replace(/\{mr_notes_section\}/g, notesSection)
     .replace(/\{mr_reminder_section\}/g, reminderSection)
+    .replace(/\{jira_context_section\}/g, jiraContext ?? "")
     .replace(/\{incremental_section\}/g, incrementalSection)
     .replace(/\{embedded_diff_section\}/g, embeddedDiffSection)
     .replace(/\{diff_fetch_instructions\}/g, diffFetchInstructions)

@@ -12,6 +12,8 @@ Identify production bugs in the PR's diff only. You are in READ-ONLY mode - anal
 
 {mr_reminder_section}
 
+{jira_context_section}
+
 {incremental_section}
 
 {embedded_diff_section}

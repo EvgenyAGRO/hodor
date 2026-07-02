@@ -27,6 +27,7 @@ import {
 import type { DiffRefs } from "./gitlab.js";
 import { setupWorkspace, cleanupWorkspace } from "./workspace.js";
 import { buildPrReviewPrompt } from "./prompt.js";
+import { buildJiraContext } from "./jira.js";
 import {
   getDefaultReasoningEffortForModel,
   mapReasoningEffort,
@@ -927,6 +928,14 @@ export async function reviewPr(opts: {
       logger.warn(`Failed to pre-fetch diff, falling back to command mode: ${err}`);
     }
 
+    // Fetch Jira context (best-effort) if the MR/PR title or description links a Jira issue
+    let jiraContext = "";
+    try {
+      jiraContext = await buildJiraContext(mrMetadata?.title, mrMetadata?.description);
+    } catch (err) {
+      logger.warn(`Failed to build Jira context: ${err}`);
+    }
+
     // Build prompt (always uses JSON template; rendered to markdown post-hoc)
     const prompt = buildPrReviewPrompt({
       prUrl: prUrl ?? `local diff (against ${targetBranch})`,
@@ -939,6 +948,7 @@ export async function reviewPr(opts: {
       embeddedDiff,
       previousReviewSha,
       localMode,
+      jiraContext,
     });
 
     const startTime = Date.now();
