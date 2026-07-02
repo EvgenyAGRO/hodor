@@ -10,6 +10,7 @@ import type { PostCommentResult } from "./types.js";
 import { renderMarkdown } from "./render.js";
 import { pushMetrics } from "./metrics.js";
 import { setLogLevel } from "./utils/logger.js";
+import { runHealthChecks, allChecksPassed, failedChecks, warningChecks } from "./health.js";
 
 const program = new Command();
 
@@ -93,6 +94,11 @@ program
     "--target-branch <ref>",
     "Override the target branch to diff against for a full review (default: the MR/PR's target branch). Only used with --full.",
   )
+  .option(
+    "--skip-health-checks",
+    "Skip pre-flight health checks (not recommended)",
+    false,
+  )
   .action(async (prUrl: string | undefined, cmdOpts: Record<string, unknown>) => {
     const verbose = cmdOpts.verbose as boolean;
     const post = cmdOpts.post as boolean;
@@ -111,6 +117,7 @@ program
     const diffAgainst = cmdOpts.diffAgainst as string;
     const full = cmdOpts.full as boolean;
     const targetBranchOverride = cmdOpts.targetBranch as string | undefined;
+    const skipHealthChecks = cmdOpts.skipHealthChecks as boolean;
 
     if (!localMode && !prUrl) {
       console.error(chalk.red("Error: pr-url is required unless --local is specified"));
@@ -256,6 +263,22 @@ program
             console.error(chalk.yellow("Warning: No Gitea/Forgejo token detected. Set GITEA_TOKEN for authentication."));
             console.error(chalk.dim("  Export GITEA_TOKEN (or FORGEJO_TOKEN) for API access.\n"));
           }
+        }
+      }
+
+      if (!skipHealthChecks) {
+        const healthPlatform = platform === "local" ? undefined : (platform as "github" | "gitlab" | "gitea");
+        const healthReport = await runHealthChecks({ platform: healthPlatform });
+        if (!allChecksPassed(healthReport)) {
+          console.error(chalk.bold.red("\nHealth Check Failed"));
+          for (const check of failedChecks(healthReport)) {
+            console.error(chalk.red(`  ✗ ${check.name}: ${check.message}`));
+          }
+          console.error(chalk.dim("\nUse --skip-health-checks to bypass (not recommended)\n"));
+          process.exit(1);
+        }
+        for (const warning of warningChecks(healthReport)) {
+          console.error(chalk.yellow(`⚠️  ${warning.name}: ${warning.message}`));
         }
       }
 
