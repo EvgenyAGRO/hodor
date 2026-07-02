@@ -1,0 +1,30 @@
+src/agent.ts
+  s_71f46325082e80::t_93c42a0a0a74ed 1091-1092
+  s_71f46325082e80::t_a46db1efaf2405 563-619
+  s_71f46325082e80::t_5710eee41bcd7a 730,747
+  s_71f46325082e80::t_bb367e011d735a 1089-1090
+  s_71f46325082e80::t_d80117319f820e 1093-1095
+  s_71f46325082e80::t_2c80c6d6e59dfe 1081-1087,1096-1159,1162-1215,1217-1223,1225-1227,1229-1230,1232-1237,1239-1242,1244-1246,1248-1295,1298-1313,1315-1333,1335-1346,1348-1351,1353-1359,1363-1365
+tests/agent-recovery.test.ts
+  s_71f46325082e80::t_0bdaac66f4854e 358,360-364,379
+  s_71f46325082e80::t_b3e49a40b34fd2 303
+  s_71f46325082e80::t_2258ce6112b0cc 175-195
+  s_71f46325082e80::t_986dd7ca7aff89 11
+  s_71f46325082e80::t_7e9aa6e05df11c 309-357,359,365-378,380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "2c29e4124d34962093710bddf2c2451ffbac75ce",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
