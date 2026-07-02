@@ -1,0 +1,35 @@
+src/health.ts
+  s_71f46325082e80::t_0fd0076390f4e0 1-207
+tests/health.test.ts
+  s_71f46325082e80::t_9b91e35c470c76 1-96
+src/cli.ts
+  s_71f46325082e80::t_9e48dd2939be52 120
+  s_71f46325082e80::t_3975d2b02ea0d9 13
+  s_71f46325082e80::t_31c151af43774f 97-101
+  s_71f46325082e80::t_9806387f1cca9f 269-282
+  s_f16d1331b34918::t_df14a2c1b6afb8 283-284
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "a488a60599896deade0dca393990d97c4743732f",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    },
+    "s_f16d1331b34918": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "962847c7-47bc-43e8-af80-fa854772f411",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
