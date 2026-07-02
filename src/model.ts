@@ -1,4 +1,9 @@
-import { getEnvApiKey, getProviders } from "@earendil-works/pi-ai";
+// pi-ai 0.80 moved getProviders()/getEnvApiKey() off the main entry point and
+// onto a new async, credential-store-aware Provider/Models collection.
+// "@earendil-works/pi-ai/compat" is pi-ai's own documented migration path
+// that keeps the old function-based API working unchanged — pi-coding-agent's
+// ModelRegistry imports from the same subpath internally.
+import { getEnvApiKey, getProviders } from "@earendil-works/pi-ai/compat";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 
 export interface ParsedModel {
