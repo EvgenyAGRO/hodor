@@ -1,0 +1,26 @@
+README.md
+  s_71f46325082e80::t_e00375e244cca1 152-155
+tests/agent.test.ts
+  s_71f46325082e80::t_10385c9d1639bb 251-313
+src/agent.ts
+  s_71f46325082e80::t_017d646a7552d1 426-429
+  s_71f46325082e80::t_1ae2f4624488bd 20,32-33
+  s_71f46325082e80::t_b32042f6ac7fae 408-425,430-436,444
+  s_71f46325082e80::t_7fa96eeb8992e4 486,525,538,548
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "af897156e5a221aa5ab536a9d6886a43e9aab5ea",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
