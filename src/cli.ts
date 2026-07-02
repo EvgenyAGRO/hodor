@@ -99,6 +99,12 @@ program
     "Skip pre-flight health checks (not recommended)",
     false,
   )
+  .option(
+    "--max-retries-when-stuck <n>",
+    "Maximum number of full from-scratch retries when the agent gets stuck or hits a repeated tool error loop (0 to disable)",
+    (val) => parseInt(val, 10),
+    1,
+  )
   .action(async (prUrl: string | undefined, cmdOpts: Record<string, unknown>) => {
     const verbose = cmdOpts.verbose as boolean;
     const post = cmdOpts.post as boolean;
@@ -118,6 +124,7 @@ program
     const full = cmdOpts.full as boolean;
     const targetBranchOverride = cmdOpts.targetBranch as string | undefined;
     const skipHealthChecks = cmdOpts.skipHealthChecks as boolean;
+    const maxRetriesWhenStuck = cmdOpts.maxRetriesWhenStuck as number;
 
     if (!localMode && !prUrl) {
       console.error(chalk.red("Error: pr-url is required unless --local is specified"));
@@ -129,6 +136,10 @@ program
     }
     if (!["summary", "inline", "hybrid"].includes(reviewStyle ?? "hybrid")) {
       console.error(chalk.red("Error: --review-style must be one of: summary, inline, hybrid"));
+      process.exit(1);
+    }
+    if (!Number.isInteger(maxRetriesWhenStuck) || maxRetriesWhenStuck < 0) {
+      console.error(chalk.red("Error: --max-retries-when-stuck must be a non-negative integer"));
       process.exit(1);
     }
     if (targetBranchOverride && !full) {
@@ -316,6 +327,7 @@ program
         diffAgainst,
         full,
         targetBranchOverride,
+        maxRetriesWhenStuck,
       });
       const reviewText = renderMarkdown(review);
 

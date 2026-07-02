@@ -119,6 +119,7 @@ Local mode:
 | `--bedrock-tags` | – | JSON cost allocation tags for AWS Bedrock |
 | `--prometheus-push` | – | Push review metrics to a Prometheus Pushgateway or VictoriaMetrics import endpoint |
 | `--skip-health-checks` | Off | Skip pre-flight checks (git/LLM key/platform token availability) before starting a review |
+| `--max-retries-when-stuck` | `1` | Full from-scratch retries (fresh agent session) when the agent gets stuck without calling `submit_review` or hits a repeated tool error loop. `0` disables retrying |
 | `-v, --verbose` | Off | Stream agent reasoning and tool calls |
 
 ## Environment Variables
@@ -143,6 +144,10 @@ Before each review, Hodor verifies git is installed, an LLM API key is set, and 
 ### Jira Context
 
 If a PR/MR title or description links a Jira issue (`https://<host>.atlassian.net/browse/PROJ-123`), Hodor fetches the issue's summary, type, status, priority, and description (and its parent issue, if it's a subtask) via the Jira REST API, and includes it as extra context in the review prompt. Requires `JIRA_EMAIL` and `JIRA_API_KEY` (a Jira API token); silently skipped if unset or the fetch fails.
+
+### Stuck / Tool Error Loop Recovery
+
+If the agent ends a turn without calling `submit_review`, Hodor re-prompts the same session (up to 2 in-session recovery attempts) before giving up on it. If those are exhausted, or the agent gets stuck repeating the same tool error 3+ times in a row, Hodor discards that session and retries the whole review from scratch with a brand-new agent session (same workspace, same prompt) — up to `--max-retries-when-stuck` times (default 1). If all attempts fail, the review fails with a diagnostic error rather than posting a degraded result.
 
 See [docs/MODELS.md](./docs/MODELS.md) for the full model/provider matrix and [docs/OPENROUTER.md](./docs/OPENROUTER.md) for an end-to-end Kimi K2.6 example.
 
