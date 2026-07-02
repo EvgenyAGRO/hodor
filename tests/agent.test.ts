@@ -248,6 +248,69 @@ describe("postReviewStructured", () => {
     expect(flattenedArgs.some((arg) => arg.includes("/notes?per_page="))).toBe(false);
     expect(flattenedArgs).not.toContain("DELETE");
   });
+
+  it("skips a finding that duplicates an existing MR comment", async () => {
+    capturedExecCalls = [];
+    const { exec } = await import("../src/utils/exec.js");
+    const { postReviewStructured } = await import("../src/agent.js");
+
+    vi.mocked(exec).mockImplementation(async (_cmd: string, args: string[]) => {
+      capturedExecCalls.push(args);
+      if (args.some((a) => a.includes("/discussions?per_page="))) {
+        return {
+          stdout: JSON.stringify([
+            {
+              id: "discussion-1",
+              notes: [
+                {
+                  id: 1,
+                  body: "**[P1] SQL injection risk**\n\nUse parameterized queries.",
+                  resolvable: true,
+                  resolved: false,
+                  position: { new_path: "src/auth.ts", new_line: 42 },
+                },
+              ],
+            },
+          ]) + "[]",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const result = await postReviewStructured({
+      prUrl: "https://gitlab.example.com/acme/app/-/merge_requests/42",
+      review: {
+        findings: [
+          {
+            title: "[P1] SQL injection risk",
+            body: "Use parameterized queries.",
+            priority: 1,
+            code_location: {
+              absolute_file_path: "/workspace/src/auth.ts",
+              line_range: { start: 42, end: 42 },
+            },
+          },
+        ],
+        overall_correctness: "patch is incorrect",
+        overall_explanation: "SQL injection risk found.",
+      },
+      reviewStyle: "hybrid",
+      workspacePath: "/workspace",
+      headSha: "dddddddddddddddddddddddddddddddddddddddd",
+    });
+
+    expect(result.success).toBe(true);
+    const flattenedArgs = capturedExecCalls.flat();
+    expect(flattenedArgs.some((arg) => arg.includes("draft_notes"))).toBe(false);
+
+    // Reset to the file's default no-op implementation for subsequent tests.
+    vi.mocked(exec).mockImplementation(async (_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      capturedExecCalls.push(args);
+      return { stdout: "", stderr: "" };
+    });
+  });
 });
 
 const SHA_OLD = "1111111111111111111111111111111111111111";

@@ -149,6 +149,10 @@ If a PR/MR title or description links a Jira issue (`https://<host>.atlassian.ne
 
 If the agent ends a turn without calling `submit_review`, Hodor re-prompts the same session (up to 2 in-session recovery attempts) before giving up on it. If those are exhausted, or the agent gets stuck repeating the same tool error 3+ times in a row, Hodor discards that session and retries the whole review from scratch with a brand-new agent session (same workspace, same prompt) — up to `--max-retries-when-stuck` times (default 1). If all attempts fail, the review fails with a diagnostic error rather than posting a degraded result.
 
+### Duplicate Comment Detection
+
+Before posting inline comments on a GitLab MR (`inline`/`hybrid` review style), Hodor fetches every existing note on the MR — from a human reviewer or a prior Hodor run — and skips any finding that fuzzy-matches one: same file, a nearby line (within 5 lines), and either a similar title (≥70% text-similarity) or the finding's title appearing verbatim in an existing comment body. Findings that duplicate an earlier finding in the same batch are also removed. This runs best-effort; if fetching existing notes fails, posting proceeds unfiltered.
+
 See [docs/MODELS.md](./docs/MODELS.md) for the full model/provider matrix and [docs/OPENROUTER.md](./docs/OPENROUTER.md) for an end-to-end Kimi K2.6 example.
 
 ## Gitea / Forgejo
