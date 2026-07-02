@@ -118,6 +118,7 @@ Local mode:
 | `--workspace` | Temp dir | Workspace directory (reuse for faster multi-PR reviews) |
 | `--bedrock-tags` | – | JSON cost allocation tags for AWS Bedrock |
 | `--prometheus-push` | – | Push review metrics to a Prometheus Pushgateway or VictoriaMetrics import endpoint |
+| `--skip-health-checks` | Off | Skip pre-flight checks (git/LLM key/platform token availability) before starting a review |
 | `-v, --verbose` | Off | Stream agent reasoning and tool calls |
 
 ## Environment Variables
@@ -133,6 +134,15 @@ Local mode:
 | `GITEA_TOKEN` / `FORGEJO_TOKEN` | Read private repos and post comments on Gitea/Forgejo PRs |
 | `GITEA_HOST` / `FORGEJO_HOST` | Hostname for Gitea/Forgejo when not inferable from a full PR URL |
 | `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` | AWS Bedrock auth (no API key needed) |
+| `JIRA_EMAIL` / `JIRA_API_KEY` | Fetch linked Jira issue context when the PR/MR title or description links a `*.atlassian.net/browse/KEY-123` issue |
+
+### Pre-flight Health Checks
+
+Before each review, Hodor verifies git is installed, an LLM API key is set, and (once the platform is known) that the right CLI/token is available for posting — `gh`/`GITHUB_TOKEN` for GitHub, `glab`/`GITLAB_TOKEN` for GitLab. Missing optional checks print a warning; missing required checks abort the run before any workspace is cloned. Use `--skip-health-checks` to bypass (not recommended).
+
+### Jira Context
+
+If a PR/MR title or description links a Jira issue (`https://<host>.atlassian.net/browse/PROJ-123`), Hodor fetches the issue's summary, type, status, priority, and description (and its parent issue, if it's a subtask) via the Jira REST API, and includes it as extra context in the review prompt. Requires `JIRA_EMAIL` and `JIRA_API_KEY` (a Jira API token); silently skipped if unset or the fetch fails.
 
 See [docs/MODELS.md](./docs/MODELS.md) for the full model/provider matrix and [docs/OPENROUTER.md](./docs/OPENROUTER.md) for an end-to-end Kimi K2.6 example.
 
