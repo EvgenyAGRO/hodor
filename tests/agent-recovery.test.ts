@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   promptResponses: [] as Array<
     | { kind: "text"; text: string }
     | { kind: "tool" }
+    | { kind: "tool_error"; message: string }
   >,
 }));
 
@@ -171,6 +172,27 @@ describe("reviewPr submit_review recovery", () => {
                   cost: { total: 0 },
                 },
               });
+            } else if (response.kind === "tool_error") {
+              emit({ type: "tool_execution_start", toolName: "bash" });
+              emit({
+                type: "tool_execution_end",
+                toolName: "bash",
+                isError: true,
+                result: { content: [{ type: "text", text: response.message }] },
+              });
+              messages.push({
+                role: "assistant",
+                stopReason: "stop",
+                content: [],
+                usage: {
+                  input: 1,
+                  output: 1,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  totalTokens: 2,
+                  cost: { total: 0 },
+                },
+              });
             } else {
               const submitReview = customTools.find((tool) => tool.name === "submit_review");
               if (!submitReview) {
@@ -278,9 +300,82 @@ describe("reviewPr submit_review recovery", () => {
       workspaceDir: "/tmp/hodor-recovery",
       cleanup: false,
       model: "anthropic/test-model",
+      maxRetriesWhenStuck: 0,
     })).rejects.toThrow(
       /Agent did not call submit_review after 2 recovery attempt\(s\): stopReason=stop, content=\[text\], text="Still no tool\."/,
     );
     expect(mocks.prompts).toHaveLength(3);
+  });
+
+  it("retries from scratch with a fresh session after the first session gets stuck", async () => {
+    mocks.promptResponses = [
+      // First (fresh) session: stuck through all in-session recovery attempts.
+      { kind: "text", text: "I found no issues." },
+      { kind: "text", text: "Still no tool." },
+      { kind: "text", text: "Still no tool." },
+      // Second (fresh) session, created by the outer retry: succeeds immediately.
+      { kind: "tool" },
+    ];
+
+    const result = await reviewPr({
+      localMode: true,
+      workspaceDir: "/tmp/hodor-recovery",
+      cleanup: false,
+      model: "anthropic/test-model",
+      maxRetriesWhenStuck: 1,
+    });
+
+    expect(result.review).toEqual({
+      findings: [],
+      overall_correctness: "patch is correct",
+      overall_explanation: "No production issues were found.",
+    });
+    expect(mocks.createAgentSession).toHaveBeenCalledTimes(2);
+    expect(mocks.prompts).toHaveLength(4);
+  });
+
+  it("fails after the outer retry also gets stuck", async () => {
+    const stuckThenSilent = [
+      { kind: "text" as const, text: "I found no issues." },
+      { kind: "text" as const, text: "Still no tool." },
+      { kind: "text" as const, text: "Still no tool." },
+    ];
+    mocks.promptResponses = [...stuckThenSilent, ...stuckThenSilent];
+
+    await expect(reviewPr({
+      localMode: true,
+      workspaceDir: "/tmp/hodor-recovery",
+      cleanup: false,
+      model: "anthropic/test-model",
+      maxRetriesWhenStuck: 1,
+    })).rejects.toThrow(/Agent did not call submit_review after 2 recovery attempt\(s\)/);
+
+    expect(mocks.createAgentSession).toHaveBeenCalledTimes(2);
+    expect(mocks.prompts).toHaveLength(6);
+  });
+
+  it("aborts on a repeated tool error loop and retries from scratch", async () => {
+    const repeatedError = { kind: "tool_error" as const, message: "Cannot use reset=True with is_input=True" };
+    mocks.promptResponses = [
+      // First session: the same tool error repeats across the initial prompt
+      // and both in-session recovery attempts (3 consecutive identical errors).
+      repeatedError,
+      repeatedError,
+      repeatedError,
+      // Second (fresh) session, created by the outer retry: succeeds immediately.
+      { kind: "tool" },
+    ];
+
+    const result = await reviewPr({
+      localMode: true,
+      workspaceDir: "/tmp/hodor-recovery",
+      cleanup: false,
+      model: "anthropic/test-model",
+      maxRetriesWhenStuck: 1,
+    });
+
+    expect(result.review.overall_correctness).toBe("patch is correct");
+    expect(mocks.createAgentSession).toHaveBeenCalledTimes(2);
+    expect(mocks.prompts).toHaveLength(4);
   });
 });

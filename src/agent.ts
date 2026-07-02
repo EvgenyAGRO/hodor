@@ -560,6 +560,63 @@ export function filterEmbeddedDiff(rawDiff: string): { filtered: string; skipped
 
 const SUBMIT_REVIEW_RECOVERY_ATTEMPTS = 2;
 
+/** Raised when the agent exhausts all in-session submit_review recovery attempts with no content. */
+export class StuckPatternError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StuckPatternError";
+  }
+}
+
+/** Raised when the agent is stuck repeating the same tool error. */
+export class ToolErrorLoopError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ToolErrorLoopError";
+  }
+}
+
+export interface ToolOutcome {
+  isError: boolean;
+  message: string;
+}
+
+// Threshold for detecting a tool error loop: consecutive identical tool errors.
+const TOOL_ERROR_LOOP_THRESHOLD = 3;
+
+/** Scan tool outcomes from the end for a run of consecutive identical errors. */
+export function detectToolErrorLoop(
+  outcomes: ToolOutcome[],
+): { isLoop: boolean; count: number; message?: string } {
+  let count = 0;
+  let lastMessage: string | undefined;
+
+  for (let i = outcomes.length - 1; i >= 0; i--) {
+    const outcome = outcomes[i];
+    if (!outcome.isError) break;
+    if (lastMessage === undefined) {
+      lastMessage = outcome.message;
+      count = 1;
+    } else if (outcome.message === lastMessage) {
+      count++;
+    } else {
+      break;
+    }
+  }
+
+  const isLoop = count >= TOOL_ERROR_LOOP_THRESHOLD;
+  return { isLoop, count, message: isLoop ? lastMessage : undefined };
+}
+
+function throwIfToolErrorLoop(outcomes: ToolOutcome[]): void {
+  const result = detectToolErrorLoop(outcomes);
+  if (result.isLoop) {
+    throw new ToolErrorLoopError(
+      `Agent stuck in tool error loop (${result.count} consecutive identical errors): ${result.message}`,
+    );
+  }
+}
+
 export function buildSubmitReviewRecoveryPrompt(attempt: number, maxAttempts: number): string {
   const finalAttempt =
     attempt >= maxAttempts
@@ -670,6 +727,7 @@ export async function reviewPr(opts: {
   diffAgainst?: string;
   full?: boolean;
   targetBranchOverride?: string;
+  maxRetriesWhenStuck?: number;
 }): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null; metrics: ReviewMetrics; workspacePath: string }> {
   const {
     prUrl,
@@ -686,6 +744,7 @@ export async function reviewPr(opts: {
     diffAgainst,
     full = false,
     targetBranchOverride,
+    maxRetriesWhenStuck = 1,
   } = opts;
 
   logger.info(`Starting PR review for: ${localMode ? "local diff" : prUrl}`);
@@ -983,81 +1042,6 @@ export async function reviewPr(opts: {
       logger.warn(`Skill diagnostic: ${diagnostic.message}${path}`);
     }
 
-    let submittedReview: ReviewOutput | null = null;
-    let submitReviewCalls = 0;
-    const submitReviewTool: ToolDefinition = {
-      name: "submit_review",
-      label: "Submit Review",
-      description: "Submit the final structured review after the analysis is complete.",
-      promptSnippet: "Submit the final structured review (call exactly once when done)",
-      parameters: SUBMIT_REVIEW_SCHEMA,
-      execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
-        submitReviewCalls++;
-        if (submittedReview) {
-          logger.warn("Agent called submit_review more than once; ignoring duplicate submission");
-          return {
-            content: [{
-              type: "text",
-              text: "Review already submitted. Do not call submit_review again.",
-            }],
-            details: { ignoredDuplicate: true },
-          };
-        }
-
-        try {
-          submittedReview = validateReviewOutput(params as ReviewOutput);
-        } catch (err) {
-          logger.warn(`Invalid submit_review payload: ${err instanceof Error ? err.message : err}`);
-          throw err;
-        }
-        logger.info(
-          `Received structured review via submit_review (${submittedReview.findings.length} finding(s))`,
-        );
-        return {
-          content: [{
-            type: "text",
-            text: "Review received. Do not output the review as normal text.",
-          }],
-          details: {},
-          terminate: true,
-        };
-      },
-    };
-
-    const { session } = await createAgentSession({
-      cwd: workspacePath,
-      model: piModel,
-      thinkingLevel,
-      // pi v0.74 filters customTools through the same allowlist as built-ins
-      // (see _refreshToolRegistry in @earendil-works/pi-coding-agent's
-      // agent-session.ts). The submit_review custom tool must be named here
-      // or the LLM never sees it and the agent loop exits without calling it.
-      tools: ["read", "bash", "grep", "find", "ls", "submit_review"],
-      customTools: [submitReviewTool],
-      authStorage,
-      modelRegistry,
-      sessionManager: SessionManager.inMemory(),
-      settingsManager,
-      resourceLoader,
-    });
-    activeSession = session;
-
-    // Inject Bedrock cost allocation tags into stream requests
-    if (bedrockTags && parsed.provider === "amazon-bedrock") {
-      type AgentWithStream = { agent: { streamFn: (...args: unknown[]) => unknown } };
-      const agent = (session as unknown as AgentWithStream).agent;
-      const originalStreamFn = agent.streamFn;
-      agent.streamFn = (...args: unknown[]) => {
-        const options = (args[2] ?? {}) as Record<string, unknown>;
-        return originalStreamFn(args[0], args[1], { ...options, requestMetadata: bedrockTags });
-      };
-      logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
-    }
-
-    // Subscribe to agent events for progress + metrics tracking
-    let turnCount = 0;
-    let toolCallCount = 0;
-
     /** Extract human-readable summary from tool args */
     function formatToolArgs(_toolName: string, args: unknown): string {
       if (typeof args === "string") return args.slice(0, 200);
@@ -1094,190 +1078,292 @@ export async function reviewPr(opts: {
       }
       return JSON.stringify(result)?.slice(0, 500) ?? "";
     }
+    for (let attempt = 0; attempt <= maxRetriesWhenStuck; attempt++) {
+      const isLastAttempt = attempt === maxRetriesWhenStuck;
+      if (attempt > 0) {
+        logger.warn(`Retrying from scratch with a fresh agent session (attempt ${attempt}/${maxRetriesWhenStuck})...`);
+        activeSession?.dispose();
+        activeSession = undefined;
+      }
 
-    session.subscribe((event) => {
-      switch (event.type) {
-        case "agent_start":
-          onEvent?.({ type: "agent_start" });
-          break;
-        case "agent_end":
-          onEvent?.({ type: "agent_end" });
-          break;
-        case "turn_start":
-          turnCount++;
-          onEvent?.({ type: "turn_start", turnIndex: turnCount });
-          break;
-        case "turn_end":
-          onEvent?.({ type: "turn_end", turnIndex: turnCount });
-          break;
-        case "tool_execution_start":
-          toolCallCount++;
-          onEvent?.({
-            type: "tool_start",
-            toolName: event.toolName,
-            toolArgs: formatToolArgs(event.toolName, event.args),
-          });
-          break;
-        case "tool_execution_end":
-          onEvent?.({
-            type: "tool_end",
-            toolName: event.toolName,
-            isError: event.isError,
-            result: formatToolResult(event.result),
-          });
-          break;
-        case "message_start":
-          onEvent?.({ type: "thinking" });
-          break;
-        case "message_update": {
-          const msgEvent = (event as Record<string, unknown>).assistantMessageEvent as
-            { type: string; delta?: string } | undefined;
-          if (!msgEvent?.delta) break;
-          if (msgEvent.type === "text_delta") {
-            onEvent?.({ type: "text_delta", delta: msgEvent.delta });
-          } else if (msgEvent.type === "thinking_delta") {
-            onEvent?.({ type: "thinking_delta", delta: msgEvent.delta });
-          }
-          break;
+      try {
+        let submittedReview: ReviewOutput | null = null;
+        let submitReviewCalls = 0;
+        const toolOutcomes: ToolOutcome[] = [];
+        const submitReviewTool: ToolDefinition = {
+          name: "submit_review",
+          label: "Submit Review",
+          description: "Submit the final structured review after the analysis is complete.",
+          promptSnippet: "Submit the final structured review (call exactly once when done)",
+          parameters: SUBMIT_REVIEW_SCHEMA,
+          execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+            submitReviewCalls++;
+            if (submittedReview) {
+              logger.warn("Agent called submit_review more than once; ignoring duplicate submission");
+              return {
+                content: [{
+                  type: "text",
+                  text: "Review already submitted. Do not call submit_review again.",
+                }],
+                details: { ignoredDuplicate: true },
+              };
+            }
+
+            try {
+              submittedReview = validateReviewOutput(params as ReviewOutput);
+            } catch (err) {
+              logger.warn(`Invalid submit_review payload: ${err instanceof Error ? err.message : err}`);
+              throw err;
+            }
+            logger.info(
+              `Received structured review via submit_review (${submittedReview.findings.length} finding(s))`,
+            );
+            return {
+              content: [{
+                type: "text",
+                text: "Review received. Do not output the review as normal text.",
+              }],
+              details: {},
+              terminate: true,
+            };
+          },
+        };
+
+        const { session } = await createAgentSession({
+          cwd: workspacePath,
+          model: piModel,
+          thinkingLevel,
+          // pi v0.74 filters customTools through the same allowlist as built-ins
+          // (see _refreshToolRegistry in @earendil-works/pi-coding-agent's
+          // agent-session.ts). The submit_review custom tool must be named here
+          // or the LLM never sees it and the agent loop exits without calling it.
+          tools: ["read", "bash", "grep", "find", "ls", "submit_review"],
+          customTools: [submitReviewTool],
+          authStorage,
+          modelRegistry,
+          sessionManager: SessionManager.inMemory(),
+          settingsManager,
+          resourceLoader,
+        });
+        activeSession = session;
+
+        // Inject Bedrock cost allocation tags into stream requests
+        if (bedrockTags && parsed.provider === "amazon-bedrock") {
+          type AgentWithStream = { agent: { streamFn: (...args: unknown[]) => unknown } };
+          const agent = (session as unknown as AgentWithStream).agent;
+          const originalStreamFn = agent.streamFn;
+          agent.streamFn = (...args: unknown[]) => {
+            const options = (args[2] ?? {}) as Record<string, unknown>;
+            return originalStreamFn(args[0], args[1], { ...options, requestMetadata: bedrockTags });
+          };
+          logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
         }
-      }
-    });
 
-    const throwIfAgentErrored = (): void => {
-      // pi-agent-core stores failed/aborted assistant turns in state.errorMessage.
-      const agentError = session.state.errorMessage;
-      if (agentError) {
-        throw new Error(`LLM request failed: ${agentError}`);
-      }
-    };
+        // Subscribe to agent events for progress + metrics tracking
+        let turnCount = 0;
+        let toolCallCount = 0;
 
-    const recoverReviewFromAssistantText = (source: string): boolean => {
-      const rawText = session.getLastAssistantText() ?? "";
-      if (!rawText.trim()) return false;
+        session.subscribe((event) => {
+          switch (event.type) {
+            case "agent_start":
+              onEvent?.({ type: "agent_start" });
+              break;
+            case "agent_end":
+              onEvent?.({ type: "agent_end" });
+              break;
+            case "turn_start":
+              turnCount++;
+              onEvent?.({ type: "turn_start", turnIndex: turnCount });
+              break;
+            case "turn_end":
+              onEvent?.({ type: "turn_end", turnIndex: turnCount });
+              break;
+            case "tool_execution_start":
+              toolCallCount++;
+              onEvent?.({
+                type: "tool_start",
+                toolName: event.toolName,
+                toolArgs: formatToolArgs(event.toolName, event.args),
+              });
+              break;
+            case "tool_execution_end": {
+              const resultText = formatToolResult(event.result);
+              onEvent?.({
+                type: "tool_end",
+                toolName: event.toolName,
+                isError: event.isError,
+                result: resultText,
+              });
+              toolOutcomes.push({ isError: !!event.isError, message: event.isError ? resultText : "" });
+              break;
+            }
+            case "message_start":
+              onEvent?.({ type: "thinking" });
+              break;
+            case "message_update": {
+              const msgEvent = (event as Record<string, unknown>).assistantMessageEvent as
+                { type: string; delta?: string } | undefined;
+              if (!msgEvent?.delta) break;
+              if (msgEvent.type === "text_delta") {
+                onEvent?.({ type: "text_delta", delta: msgEvent.delta });
+              } else if (msgEvent.type === "thinking_delta") {
+                onEvent?.({ type: "thinking_delta", delta: msgEvent.delta });
+              }
+              break;
+            }
+          }
+        });
 
-      const parsedReview = parseReviewFromAssistantText(rawText);
-      if (!parsedReview) return false;
+        const throwIfAgentErrored = (): void => {
+          // pi-agent-core stores failed/aborted assistant turns in state.errorMessage.
+          const agentError = session.state.errorMessage;
+          if (agentError) {
+            throw new Error(`LLM request failed: ${agentError}`);
+          }
+        };
 
-      submittedReview = parsedReview;
-      logger.warn(
-        `Recovered structured review from assistant text after ${source}; model did not call submit_review`,
-      );
-      return true;
-    };
+        const recoverReviewFromAssistantText = (source: string): boolean => {
+          const rawText = session.getLastAssistantText() ?? "";
+          if (!rawText.trim()) return false;
 
-    logger.info("Sending prompt to agent...");
-    await session.prompt(prompt);
-    throwIfAgentErrored();
+          const parsedReview = parseReviewFromAssistantText(rawText);
+          if (!parsedReview) return false;
 
-    if (!submittedReview) {
-      recoverReviewFromAssistantText("initial agent run");
-    }
+          submittedReview = parsedReview;
+          logger.warn(
+            `Recovered structured review from assistant text after ${source}; model did not call submit_review`,
+          );
+          return true;
+        };
 
-    for (
-      let attempt = 1;
-      !submittedReview && attempt <= SUBMIT_REVIEW_RECOVERY_ATTEMPTS;
-      attempt++
-    ) {
-      logger.warn(
-        `Agent ended without a valid submit_review (${summarizeLastAssistantMessage(session)}); ` +
-        `requesting recovery ${attempt}/${SUBMIT_REVIEW_RECOVERY_ATTEMPTS}`,
-      );
-      await session.prompt(buildSubmitReviewRecoveryPrompt(attempt, SUBMIT_REVIEW_RECOVERY_ATTEMPTS));
-      throwIfAgentErrored();
-      recoverReviewFromAssistantText(`recovery attempt ${attempt}`);
-    }
+        logger.info("Sending prompt to agent...");
+        await session.prompt(prompt);
+        throwIfAgentErrored();
+        throwIfToolErrorLoop(toolOutcomes);
 
-    if (!submittedReview) {
-      const diagnostic = summarizeLastAssistantMessage(session);
-      if (submitReviewCalls > 0) {
-        throw new Error(
-          `Agent called submit_review but did not provide a valid review payload after ` +
-          `${SUBMIT_REVIEW_RECOVERY_ATTEMPTS} recovery attempt(s): ${diagnostic}`,
+        if (!submittedReview) {
+          recoverReviewFromAssistantText("initial agent run");
+        }
+
+        for (
+          let recoveryAttempt = 1;
+          !submittedReview && recoveryAttempt <= SUBMIT_REVIEW_RECOVERY_ATTEMPTS;
+          recoveryAttempt++
+        ) {
+          logger.warn(
+            `Agent ended without a valid submit_review (${summarizeLastAssistantMessage(session)}); ` +
+            `requesting recovery ${recoveryAttempt}/${SUBMIT_REVIEW_RECOVERY_ATTEMPTS}`,
+          );
+          await session.prompt(buildSubmitReviewRecoveryPrompt(recoveryAttempt, SUBMIT_REVIEW_RECOVERY_ATTEMPTS));
+          throwIfAgentErrored();
+          throwIfToolErrorLoop(toolOutcomes);
+          recoverReviewFromAssistantText(`recovery attempt ${recoveryAttempt}`);
+        }
+
+        if (!submittedReview) {
+          const diagnostic = summarizeLastAssistantMessage(session);
+          if (submitReviewCalls > 0) {
+            throw new StuckPatternError(
+              `Agent called submit_review but did not provide a valid review payload after ` +
+              `${SUBMIT_REVIEW_RECOVERY_ATTEMPTS} recovery attempt(s): ${diagnostic}`,
+            );
+          }
+          throw new StuckPatternError(
+            `Agent did not call submit_review after ${SUBMIT_REVIEW_RECOVERY_ATTEMPTS} recovery attempt(s): ${diagnostic}`,
+          );
+        }
+
+        const rawReview = submittedReview as ReviewOutput;
+        if (submitReviewCalls > 1) {
+          logger.warn(`Agent called submit_review ${submitReviewCalls} times; using the first valid submission`);
+        }
+
+        // Resolve each finding's line_range from its quoted snippet against the
+        // checked-out file, correcting model line-number errors before posting.
+        const { review, stats: locationStats } = resolveReviewLocations(rawReview, {
+          workspacePath,
+          diffText: embeddedDiff,
+        });
+        if (locationStats.corrected > 0 || locationStats.unmatched > 0) {
+          logger.info(
+            `Location resolution: ${locationStats.corrected} corrected, ${locationStats.confirmed} confirmed, ` +
+              `${locationStats.unmatched} unmatched, ${locationStats.noSnippet} without snippet`,
+          );
+        }
+
+        logger.info(
+          `Captured ${review.findings.length} finding(s), verdict: ${review.overall_correctness}`,
         );
+
+        const durationSeconds = (Date.now() - startTime) / 1000;
+        logger.info(`Review complete (${review.findings.length} finding(s))`);
+
+        // Aggregate usage from all assistant messages
+        interface MsgUsage {
+          input: number;
+          output: number;
+          cacheRead: number;
+          cacheWrite: number;
+          totalTokens: number;
+          cost: { total: number };
+        }
+        interface AssistantMsg {
+          role: string;
+          usage?: MsgUsage;
+        }
+
+        const allMessages = session.messages as AssistantMsg[];
+
+        let inputTokens = 0;
+        let outputTokens = 0;
+        let cacheReadTokens = 0;
+        let cacheWriteTokens = 0;
+        let totalTokens = 0;
+        let cost = 0;
+
+        for (const msg of allMessages) {
+          if (msg.role === "assistant" && msg.usage) {
+            inputTokens += msg.usage.input ?? 0;
+            outputTokens += msg.usage.output ?? 0;
+            cacheReadTokens += msg.usage.cacheRead ?? 0;
+            cacheWriteTokens += msg.usage.cacheWrite ?? 0;
+            totalTokens += msg.usage.totalTokens ?? 0;
+            cost += msg.usage.cost?.total ?? 0;
+          }
+        }
+
+        const metrics: ReviewMetrics = {
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          cacheWriteTokens,
+          totalTokens,
+          cost,
+          turns: turnCount,
+          toolCalls: toolCallCount,
+          durationSeconds: Math.round(durationSeconds),
+        };
+        printMetrics(metrics);
+
+        let metricsFooter: string | null = null;
+        if (includeMetricsFooter) {
+          metricsFooter = formatMetricsMarkdown(metrics);
+        }
+
+        return { review, metricsFooter, headSha, metrics, workspacePath };
+      } catch (err) {
+        if ((err instanceof StuckPatternError || err instanceof ToolErrorLoopError) && !isLastAttempt) {
+          logger.warn(`${err.message}`);
+          continue;
+        }
+        throw err;
       }
-      throw new Error(
-        `Agent did not call submit_review after ${SUBMIT_REVIEW_RECOVERY_ATTEMPTS} recovery attempt(s): ${diagnostic}`,
-      );
     }
 
-    const rawReview = submittedReview as ReviewOutput;
-    if (submitReviewCalls > 1) {
-      logger.warn(`Agent called submit_review ${submitReviewCalls} times; using the first valid submission`);
-    }
+    // Unreachable: the loop above always returns on success or throws on the
+    // final attempt, but TS can't prove that from a dynamic loop bound.
+    throw new Error("Review failed: exhausted all retry attempts");
 
-    // Resolve each finding's line_range from its quoted snippet against the
-    // checked-out file, correcting model line-number errors before posting.
-    const { review, stats: locationStats } = resolveReviewLocations(rawReview, {
-      workspacePath,
-      diffText: embeddedDiff,
-    });
-    if (locationStats.corrected > 0 || locationStats.unmatched > 0) {
-      logger.info(
-        `Location resolution: ${locationStats.corrected} corrected, ${locationStats.confirmed} confirmed, ` +
-          `${locationStats.unmatched} unmatched, ${locationStats.noSnippet} without snippet`,
-      );
-    }
-
-    logger.info(
-      `Captured ${review.findings.length} finding(s), verdict: ${review.overall_correctness}`,
-    );
-
-    const durationSeconds = (Date.now() - startTime) / 1000;
-    logger.info(`Review complete (${review.findings.length} finding(s))`);
-
-    // Aggregate usage from all assistant messages
-    interface MsgUsage {
-      input: number;
-      output: number;
-      cacheRead: number;
-      cacheWrite: number;
-      totalTokens: number;
-      cost: { total: number };
-    }
-    interface AssistantMsg {
-      role: string;
-      usage?: MsgUsage;
-    }
-
-    const allMessages = session.messages as AssistantMsg[];
-
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let cacheReadTokens = 0;
-    let cacheWriteTokens = 0;
-    let totalTokens = 0;
-    let cost = 0;
-
-    for (const msg of allMessages) {
-      if (msg.role === "assistant" && msg.usage) {
-        inputTokens += msg.usage.input ?? 0;
-        outputTokens += msg.usage.output ?? 0;
-        cacheReadTokens += msg.usage.cacheRead ?? 0;
-        cacheWriteTokens += msg.usage.cacheWrite ?? 0;
-        totalTokens += msg.usage.totalTokens ?? 0;
-        cost += msg.usage.cost?.total ?? 0;
-      }
-    }
-
-    const metrics: ReviewMetrics = {
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheWriteTokens,
-      totalTokens,
-      cost,
-      turns: turnCount,
-      toolCalls: toolCallCount,
-      durationSeconds: Math.round(durationSeconds),
-    };
-    printMetrics(metrics);
-
-    let metricsFooter: string | null = null;
-    if (includeMetricsFooter) {
-      metricsFooter = formatMetricsMarkdown(metrics);
-    }
-
-    return { review, metricsFooter, headSha, metrics, workspacePath };
   } finally {
     activeSession?.dispose();
 
