@@ -66,6 +66,13 @@ COPY --from=build /build/dist ./dist
 COPY --from=build /build/templates ./templates
 COPY --from=build /build/package.json ./
 
+# Expose a `hodor` binary on PATH for consumers that run this image with a
+# blank entrypoint and invoke `hodor <args>` directly as a script command
+# (e.g. GitLab CI `image: {entrypoint: [""]}` jobs), rather than relying on
+# this image's own ENTRYPOINT/CMD.
+RUN printf '#!/bin/sh\nexec bun run /app/dist/cli.js "$@"\n' > /usr/local/bin/hodor && \
+    chmod +x /usr/local/bin/hodor
+
 # Set wider terminal dimensions
 ENV COLUMNS=200
 ENV LINES=50
