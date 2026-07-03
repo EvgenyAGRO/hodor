@@ -78,7 +78,9 @@ const PYPI_CLASSIFIER_TO_LICENSE: Record<string, string> = {
  */
 function classifyByKeyword(normalized: string): LicenseVerdict {
   if (/\bagpl\b|affero general public/.test(normalized)) return "flagged";
-  if (/\blgpl\b|lesser general public/.test(normalized)) return "flagged";
+  // "Library General Public License" is the original (pre-2.1) name for the
+  // LGPL — Hibernate and other common Java libs still report it that way.
+  if (/\blgpl\b|lesser general public|library general public/.test(normalized)) return "flagged";
   if (/\bgpl\b|gnu general public/.test(normalized)) return "flagged";
   if (/sspl|server side public/.test(normalized)) return "flagged";
   if (/business source license|\bbusl\b/.test(normalized)) return "flagged";
