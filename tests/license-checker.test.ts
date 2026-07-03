@@ -53,6 +53,8 @@ describe("classifyLicense", () => {
     expect(mod.classifyLicense("The Apache Software License, Version 2.0")).toBe("allowed");
     expect(mod.classifyLicense("Apache License, Version 2.0")).toBe("allowed");
     expect(mod.classifyLicense("GNU Lesser General Public License")).toBe("flagged");
+    // Hibernate (default Spring Boot JPA provider) reports the pre-2.1 name.
+    expect(mod.classifyLicense("GNU Library General Public License v2.1 or later")).toBe("flagged");
     expect(mod.classifyLicense("GNU General Public License v2.0")).toBe("flagged");
     expect(mod.classifyLicense("GNU Affero General Public License v3")).toBe("flagged");
     expect(mod.classifyLicense("Eclipse Public License - v 2.0")).toBe("allowed");
