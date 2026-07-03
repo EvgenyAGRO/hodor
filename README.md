@@ -156,7 +156,18 @@ Before posting inline comments on a GitLab MR (`inline`/`hybrid` review style), 
 
 ### Dependency License Checks
 
-If a PR/MR adds or version-bumps a dependency in `package.json` (npm) or `requirements.txt` (pip), Hodor looks up that dependency's license via the npm registry or PyPI's API and flags it as a finding if the license isn't on a permissive allowlist (MIT, Apache-2.0, BSD-\*, ISC, etc.). Known copyleft/restrictive licenses (GPL/AGPL/LGPL, SSPL, BUSL, Commons-Clause, CC-BY-NC-\*, etc.) are flagged as a P1; licenses that can't be determined are flagged as a P2 asking for manual verification. This is deterministic (no LLM call for the classification itself) and runs on every review unless `--skip-license-check` is set. Best-effort throughout — a registry lookup failure for one package doesn't block the review or the others.
+If a PR/MR adds or version-bumps a dependency, Hodor looks up that dependency's license and flags it as a finding if the license isn't on a permissive allowlist (MIT, Apache-2.0, BSD-\*, ISC, EPL, MPL-2.0, etc.). Known copyleft/restrictive licenses (GPL/AGPL/LGPL, SSPL, BUSL, Commons-Clause, CC-BY-NC-\*, etc.) are flagged as a P1; licenses that can't be determined are flagged as a P2 asking for manual verification. This is deterministic (no LLM call for the classification itself) and runs on every review unless `--skip-license-check` is set. Best-effort throughout — a registry lookup failure for one package doesn't block the review or the others.
+
+Supported manifests:
+
+| Ecosystem | Manifest | License source |
+|-----------|----------|-----------------|
+| npm | `package.json` | npm registry (`registry.npmjs.org`) |
+| Python | `requirements.txt`, `pyproject.toml` (PEP 621 and Poetry) | PyPI API — prefers the PEP 639 `license_expression` field (what modern setuptools/hatchling packages populate), falls back to trove classifiers, then free-text |
+| Maven | `pom.xml` | The artifact's own POM on Maven Central; falls back one level to its `<parent>` POM if `<licenses>` isn't declared directly |
+| Go | `go.mod` | GitHub's license-detection API, for `github.com/...`-hosted modules (the majority of the Go OSS ecosystem). `golang.org/x/*` is special-cased as BSD-3-Clause. Non-GitHub-hosted modules (gitlab.com, custom domains) are marked unknown rather than guessed |
+
+Only direct dependencies are checked (`dependencies` in `package.json`, not `devDependencies`; direct Maven/Go/Poetry dependencies, not transitive ones pulled in indirectly). The allowed/flagged license lists are a reasonable general-purpose default — review `src/license-checker.ts` and adjust them against your own legal/compliance policy.
 
 See [docs/MODELS.md](./docs/MODELS.md) for the full model/provider matrix and [docs/OPENROUTER.md](./docs/OPENROUTER.md) for an end-to-end Kimi K2.6 example.
 
