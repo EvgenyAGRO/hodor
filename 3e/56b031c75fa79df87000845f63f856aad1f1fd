@@ -1,0 +1,26 @@
+src/license-checker.ts
+  s_71f46325082e80::t_60a6475e56a6f8 5,9-10,25-27,34,70-99,106,118-119,151-296,313-319,342,344-345,349-351,411-494,500-514,522-526,528
+README.md
+  s_71f46325082e80::t_360d8aae55c16d 159-170
+tests/license-checker.test.ts
+  s_71f46325082e80::t_c937b45d23949f 52,54-58
+  s_71f46325082e80::t_8abfbf50ca2311 107-273
+  s_71f46325082e80::t_e8660e59fdccca 42-51,53,59
+  s_71f46325082e80::t_2fabd79058ec92 392-463
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "3e56b031c75fa79df87000845f63f856aad1f1fd",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
