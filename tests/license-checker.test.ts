@@ -35,9 +35,18 @@ describe("classifyLicense", () => {
     expect(mod.classifyLicense("SomeCustomEULA-1.0")).toBe("unknown");
   });
 
-  it("resolves OR expressions as allowed only if every alternative is allowed", () => {
+  it("resolves OR expressions as allowed when any alternative is allowed (licensee's choice)", () => {
     expect(mod.classifyLicense("(MIT OR Apache-2.0)")).toBe("allowed");
-    expect(mod.classifyLicense("MIT OR GPL-3.0")).toBe("flagged");
+    // SPDX OR = the consumer picks one; a permissive option makes it allowed.
+    expect(mod.classifyLicense("MIT OR GPL-3.0")).toBe("allowed");
+    expect(mod.classifyLicense("(GPL-2.0-or-later OR MIT)")).toBe("allowed");
+    // Only flagged when every alternative is restrictive.
+    expect(mod.classifyLicense("GPL-3.0 OR AGPL-3.0")).toBe("flagged");
+  });
+
+  it("resolves AND expressions as flagged if any component is restrictive", () => {
+    expect(mod.classifyLicense("Apache-2.0 AND MIT")).toBe("allowed");
+    expect(mod.classifyLicense("Apache-2.0 AND GPL-3.0")).toBe("flagged");
   });
 
   it("falls back to keyword matching for free-text license names (Maven <name>, PyPI free text)", () => {
@@ -116,6 +125,19 @@ dependencies = [
 `;
     const deps = mod.parsePyprojectToml(content);
     expect(deps.get("requests")).toBe(">=2.31.0");
+    expect(deps.get("flask")).toBe("==2.3.0");
+  });
+
+  it("does not truncate the dependencies array at an extras bracket", () => {
+    // A `]` inside "uvicorn[standard]" must not end the array capture early —
+    // every dependency after it would otherwise be silently dropped.
+    const content = `
+[project]
+dependencies = ["requests>=2.31.0", "uvicorn[standard]>=0.20", "flask==2.3.0"]
+`;
+    const deps = mod.parsePyprojectToml(content);
+    expect(deps.get("requests")).toBe(">=2.31.0");
+    expect(deps.get("uvicorn")).toBe(">=0.20");
     expect(deps.get("flask")).toBe("==2.3.0");
   });
 
@@ -304,6 +326,8 @@ describe("findManifestDependencyChanges", () => {
 
   it("detects a newly added npm dependency", async () => {
     execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "package.json\nsrc/index.ts\n", stderr: "" };
       const ref = args[1];
       if (ref === "base:package.json") {
         return { stdout: JSON.stringify({ dependencies: { chalk: "^5.0.0" } }), stderr: "" };
@@ -323,8 +347,48 @@ describe("findManifestDependencyChanges", () => {
     ]);
   });
 
+  it("discovers manifests in subdirectories (multi-module Maven / monorepo)", async () => {
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "services/api/pom.xml\n", stderr: "" };
+      const ref = args[1];
+      if (ref === "base:services/api/pom.xml") {
+        return { stdout: "<project><dependencies></dependencies></project>", stderr: "" };
+      }
+      if (ref === "HEAD:services/api/pom.xml") {
+        return {
+          stdout:
+            "<project><dependencies><dependency><groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version></dependency></dependencies></project>",
+          stderr: "",
+        };
+      }
+      throw new Error("not found");
+    });
+
+    const changes = await mod.findManifestDependencyChanges("/workspace", "base");
+    expect(changes).toEqual([
+      { ecosystem: "maven", name: "com.example:lib", version: "1.0.0", manifestPath: "services/api/pom.xml" },
+    ]);
+  });
+
+  it("returns nothing (and does not flood) when the base ref is unreachable", async () => {
+    // Shallow CI clone: merge-base and diff both fail. Must skip, not treat
+    // the whole HEAD manifest as newly added.
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") throw new Error("no merge base");
+      if (args[0] === "diff") throw new Error("bad object base");
+      throw new Error("not found");
+    });
+    const changes = await mod.findManifestDependencyChanges("/workspace", "base");
+    expect(changes).toEqual([]);
+  });
+
   it("returns nothing when no manifest changed", async () => {
-    execMock.mockRejectedValue(new Error("not found"));
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "src/index.ts\nREADME.md\n", stderr: "" };
+      throw new Error("not found");
+    });
     const changes = await mod.findManifestDependencyChanges("/workspace", "base");
     expect(changes).toEqual([]);
   });
@@ -428,11 +492,36 @@ describe("checkDependencyLicenses", () => {
     expect(results[0].verdict).toBe("allowed");
   });
 
-  it("does not attempt a Maven POM fetch when the version couldn't be resolved", async () => {
+  it("falls back to Maven Central latest release when the version is unresolved (Spring Boot BOM case)", async () => {
+    // Version-less <dependency> entries (managed by spring-boot-starter-parent)
+    // resolve their license via the latest published release.
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.endsWith("/maven-metadata.xml")) {
+        return new Response("<metadata><versioning><release>3.2.0</release></versioning></metadata>", { status: 200 });
+      }
+      if (url.endsWith(".pom")) {
+        return new Response(
+          "<project><licenses><license><name>Apache License, Version 2.0</name></license></licenses></project>",
+          { status: 200 },
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+    const results = await mod.checkDependencyLicenses([
+      { ecosystem: "maven", name: "org.springframework.boot:spring-boot-starter-web", version: null, manifestPath: "pom.xml" },
+    ]);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-starter-web/maven-metadata.xml",
+      expect.anything(),
+    );
+    expect(results[0].verdict).toBe("allowed");
+  });
+
+  it("marks a version-less Maven dep unknown when even the latest release can't be found", async () => {
+    mockFetch.mockResolvedValue(new Response("", { status: 404 }));
     const results = await mod.checkDependencyLicenses([
       { ecosystem: "maven", name: "com.example:lib", version: null, manifestPath: "pom.xml" },
     ]);
-    expect(mockFetch).not.toHaveBeenCalled();
     expect(results[0].verdict).toBe("unknown");
   });
 
@@ -472,7 +561,11 @@ describe("buildLicenseFindings", () => {
   });
 
   it("returns no findings when nothing changed", async () => {
-    execMock.mockRejectedValue(new Error("not found"));
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "", stderr: "" };
+      throw new Error("not found");
+    });
     const findings = await mod.buildLicenseFindings({ workspacePath: "/workspace", baseRef: "base" });
     expect(findings).toEqual([]);
     expect(mockFetch).not.toHaveBeenCalled();
@@ -480,6 +573,8 @@ describe("buildLicenseFindings", () => {
 
   it("emits a P1 finding for a flagged license and skips allowed ones", async () => {
     execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "package.json\n", stderr: "" };
       const ref = args[1];
       if (ref === "base:package.json") {
         return { stdout: JSON.stringify({ dependencies: {} }), stderr: "" };
@@ -507,5 +602,25 @@ describe("buildLicenseFindings", () => {
     expect(findings[0].priority).toBe(1);
     expect(findings[0].title).toContain("gpl-pkg");
     expect(findings[0].code_location.absolute_file_path).toBe("/workspace/package.json");
+  });
+
+  it("suppresses findings when all registry lookups fail (assumes no network access)", async () => {
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "package.json\n", stderr: "" };
+      const ref = args[1];
+      if (ref === "base:package.json") return { stdout: JSON.stringify({ dependencies: {} }), stderr: "" };
+      if (ref === "HEAD:package.json") {
+        return {
+          stdout: JSON.stringify({ dependencies: { a: "^1", b: "^1", c: "^1" } }),
+          stderr: "",
+        };
+      }
+      throw new Error("not found");
+    });
+    mockFetch.mockRejectedValue(new Error("ENETUNREACH"));
+
+    const findings = await mod.buildLicenseFindings({ workspacePath: "/workspace", baseRef: "base" });
+    expect(findings).toEqual([]);
   });
 });

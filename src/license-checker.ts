@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { exec } from "./utils/exec.js";
 import { logger } from "./utils/logger.js";
 import type { ReviewFinding } from "./types.js";
@@ -97,6 +99,12 @@ function classifyByKeyword(normalized: string): LicenseVerdict {
   return "unknown";
 }
 
+function classifySingle(normalizedPart: string): LicenseVerdict {
+  if (ALLOWED_LICENSES.has(normalizedPart)) return "allowed";
+  if (FLAGGED_LICENSES.has(normalizedPart)) return "flagged";
+  return classifyByKeyword(normalizedPart);
+}
+
 export function classifyLicense(license: string | null): LicenseVerdict {
   if (!license) return "unknown";
   const normalized = license.trim().toLowerCase();
@@ -104,16 +112,33 @@ export function classifyLicense(license: string | null): LicenseVerdict {
   if (ALLOWED_LICENSES.has(normalized)) return "allowed";
   if (FLAGGED_LICENSES.has(normalized)) return "flagged";
 
-  // SPDX dual/OR expressions like "(MIT OR Apache-2.0)": allowed if every
-  // alternative is allowed, flagged if any alternative is a known bad actor.
-  const parts = normalized
-    .replace(/[()]/g, "")
-    .split(/\s+or\s+|\s+and\s+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-  if (parts.length > 1) {
-    if (parts.some((p) => FLAGGED_LICENSES.has(p))) return "flagged";
-    if (parts.every((p) => ALLOWED_LICENSES.has(p))) return "allowed";
+  // SPDX composite expressions. OR means the licensee chooses, so one allowed
+  // alternative is enough — dual-licensed "(GPL-2.0 OR MIT)" is fine, use it
+  // under MIT. A flagged part still wins over unknowns ("GPL-3.0 OR SomeEULA")
+  // since free-text names like "LGPL v3.0 or later" also land here. AND means
+  // every license applies simultaneously, so any flagged part taints the whole.
+  const stripped = normalized.replace(/[()]/g, " ");
+  const hasOr = /\s+or\s+/.test(stripped);
+  const hasAnd = /\s+and\s+/.test(stripped);
+  if (hasOr && !hasAnd) {
+    const verdicts = stripped
+      .split(/\s+or\s+/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map(classifySingle);
+    if (verdicts.includes("allowed")) return "allowed";
+    if (verdicts.includes("flagged")) return "flagged";
+    return "unknown";
+  }
+  if (hasAnd) {
+    const verdicts = stripped
+      .split(/\s+(?:and|or)\s+/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map(classifySingle);
+    if (verdicts.includes("flagged")) return "flagged";
+    if (verdicts.length > 1 && verdicts.every((v) => v === "allowed")) return "allowed";
+    return "unknown";
   }
 
   return classifyByKeyword(normalized);
@@ -172,11 +197,35 @@ function extractTomlSection(content: string, sectionHeader: string): string | nu
  * general TOML parser — it only understands the shapes these two sections
  * commonly take.
  */
+/**
+ * Extract the body of the `[` ... `]` array starting at/after `fromIndex` by
+ * depth-counting brackets — a non-greedy regex would stop at the first `]`
+ * inside an extras spec like "uvicorn[standard]>=0.20" and silently drop
+ * every entry after it.
+ */
+function extractArrayBody(text: string, fromIndex: number): string | null {
+  const open = text.indexOf("[", fromIndex);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "[") depth++;
+    else if (text[i] === "]") {
+      depth--;
+      if (depth === 0) return text.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
 export function parsePyprojectToml(content: string): Map<string, string> {
   const result = new Map<string, string>();
 
   const projectSection = extractTomlSection(content, "[project]");
-  const dependenciesArray = projectSection?.match(/dependencies\s*=\s*\[([\s\S]*?)\]/)?.[1];
+  const depsKey = projectSection?.match(/(?:^|\n)\s*dependencies\s*=/);
+  const dependenciesArray =
+    projectSection && depsKey?.index !== undefined
+      ? extractArrayBody(projectSection, depsKey.index + depsKey[0].length)
+      : null;
   if (dependenciesArray) {
     const entries = dependenciesArray.match(/"([^"]+)"|'([^']+)'/g) ?? [];
     for (const raw of entries) {
@@ -241,22 +290,31 @@ export function parseMavenDependencies(xmlContent: string): Map<string, string> 
   const xml = stripXmlComments(xmlContent);
   const props = extractMavenProperties(xml);
 
-  const withoutManagement = xml.replace(/<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g, "");
-  const depsBlock = withoutManagement.match(/<dependencies>([\s\S]*?)<\/dependencies>/)?.[1];
-  if (!depsBlock) return result;
+  // Drop sections whose <dependencies> aren't the project's own direct deps:
+  // dependencyManagement declares constraints, <build> holds plugin deps, and
+  // <profiles>/<reporting> are conditional or tooling-only.
+  const cleaned = xml
+    .replace(/<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g, "")
+    .replace(/<build>[\s\S]*?<\/build>/g, "")
+    .replace(/<profiles>[\s\S]*?<\/profiles>/g, "")
+    .replace(/<reporting>[\s\S]*?<\/reporting>/g, "");
 
-  const depRegex = /<dependency>([\s\S]*?)<\/dependency>/g;
-  let match;
-  while ((match = depRegex.exec(depsBlock))) {
-    // Strip nested <exclusions> first so an exclusion's own groupId/artifactId
-    // isn't misread as this <dependency>'s identity.
-    const block = match[1].replace(/<exclusions>[\s\S]*?<\/exclusions>/g, "");
-    const groupId = block.match(/<groupId>([^<]+)<\/groupId>/)?.[1]?.trim();
-    const artifactId = block.match(/<artifactId>([^<]+)<\/artifactId>/)?.[1]?.trim();
-    if (!groupId || !artifactId) continue;
-    const rawVersion = block.match(/<version>([^<]+)<\/version>/)?.[1];
-    const version = resolveMavenVersion(rawVersion, props);
-    result.set(`${groupId}:${artifactId}`, version ?? "");
+  const blockRegex = /<dependencies>([\s\S]*?)<\/dependencies>/g;
+  let blockMatch;
+  while ((blockMatch = blockRegex.exec(cleaned))) {
+    const depRegex = /<dependency>([\s\S]*?)<\/dependency>/g;
+    let match;
+    while ((match = depRegex.exec(blockMatch[1]))) {
+      // Strip nested <exclusions> first so an exclusion's own groupId/artifactId
+      // isn't misread as this <dependency>'s identity.
+      const block = match[1].replace(/<exclusions>[\s\S]*?<\/exclusions>/g, "");
+      const groupId = block.match(/<groupId>([^<]+)<\/groupId>/)?.[1]?.trim();
+      const artifactId = block.match(/<artifactId>([^<]+)<\/artifactId>/)?.[1]?.trim();
+      if (!groupId || !artifactId) continue;
+      const rawVersion = block.match(/<version>([^<]+)<\/version>/)?.[1];
+      const version = resolveMavenVersion(rawVersion, props);
+      result.set(`${groupId}:${artifactId}`, version ?? "");
+    }
   }
   return result;
 }
@@ -328,21 +386,74 @@ async function readFileAtRef(workspacePath: string, ref: string, path: string): 
 }
 
 /**
+ * Read the "after" side of the comparison: the working tree in local mode
+ * (so uncommitted manifest edits are seen, matching how the main review
+ * diffs), or the committed headRef in CI mode.
+ */
+async function readHeadSide(
+  workspacePath: string,
+  headRef: string,
+  path: string,
+  useWorkingTree: boolean,
+): Promise<string | null> {
+  if (useWorkingTree) {
+    try {
+      return await readFile(join(workspacePath, path), "utf-8");
+    } catch {
+      return null;
+    }
+  }
+  return readFileAtRef(workspacePath, headRef, path);
+}
+
+/**
  * Find dependency additions/version changes in any tracked manifest between
- * baseRef and headRef. Only top-level manifests (repo root) are checked;
- * monorepo sub-package manifests are out of scope for now.
+ * baseRef and headRef, anywhere in the tree — multi-module Maven projects and
+ * monorepos keep manifests in subdirectories, not just the repo root. Changed
+ * manifests are discovered from the git diff, so only files actually touched
+ * by this change range are parsed.
  */
 export async function findManifestDependencyChanges(
   workspacePath: string,
   baseRef: string,
   headRef = "HEAD",
+  useWorkingTree = false,
 ): Promise<DependencyChange[]> {
-  const changes: DependencyChange[] = [];
+  // Resolve the merge base so a target branch that advanced after this branch
+  // forked doesn't leak its own dependency changes into the comparison.
+  let base = baseRef;
+  try {
+    const { stdout } = await exec("git", ["merge-base", baseRef, headRef], { cwd: workspacePath });
+    base = stdout.trim() || baseRef;
+  } catch {
+    // Shallow clone or unrelated refs — compare against baseRef directly.
+  }
 
-  for (const [path, manifest] of Object.entries(MANIFEST_PARSERS)) {
+  // Discover changed manifests from the diff itself. If the base is not a
+  // reachable commit (shallow CI clone), this fails and we skip the check
+  // entirely — treating an unreadable base as "empty" would make every
+  // existing dependency look newly added and flood the MR with findings.
+  let changedFiles: string[];
+  try {
+    const diffArgs = useWorkingTree
+      ? ["diff", "--name-only", base]
+      : ["diff", "--name-only", base, headRef];
+    const { stdout } = await exec("git", diffArgs, { cwd: workspacePath });
+    changedFiles = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch (err) {
+    logger.warn(`License check: failed to list changed files: ${err instanceof Error ? err.message : err}`);
+    return [];
+  }
+
+  const changes: DependencyChange[] = [];
+  for (const path of changedFiles) {
+    const basename = path.split("/").pop() ?? path;
+    const manifest = MANIFEST_PARSERS[basename];
+    if (!manifest) continue;
+
     const [before, after] = await Promise.all([
-      readFileAtRef(workspacePath, baseRef, path),
-      readFileAtRef(workspacePath, headRef, path),
+      readFileAtRef(workspacePath, base, path),
+      readHeadSide(workspacePath, headRef, path, useWorkingTree),
     ]);
     if (after === null || before === after) continue;
 
@@ -412,6 +523,28 @@ function mavenGroupPath(groupId: string): string {
   return groupId.replace(/\./g, "/");
 }
 
+/**
+ * Resolve the latest released version of an artifact from Maven Central's
+ * maven-metadata.xml. Used when the pom.xml omits <version> — the norm in
+ * Spring Boot projects where versions are managed by the parent BOM.
+ */
+async function fetchMavenLatestVersion(groupId: string, artifactId: string): Promise<string | null> {
+  const url = `https://repo1.maven.org/maven2/${mavenGroupPath(groupId)}/${artifactId}/maven-metadata.xml`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return null;
+    const xml = await res.text();
+    return (
+      xml.match(/<release>([^<]+)<\/release>/)?.[1]?.trim() ??
+      xml.match(/<latest>([^<]+)<\/latest>/)?.[1]?.trim() ??
+      null
+    );
+  } catch (err) {
+    logger.warn(`Failed to fetch Maven metadata for ${groupId}:${artifactId}: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
 async function fetchMavenPom(groupId: string, artifactId: string, version: string): Promise<string | null> {
   const url = `https://repo1.maven.org/maven2/${mavenGroupPath(groupId)}/${artifactId}/${version}/${artifactId}-${version}.pom`;
   try {
@@ -442,13 +575,18 @@ function extractMavenParent(pomXml: string): { groupId: string; artifactId: stri
  * Fetch a Maven artifact's license from its POM on Maven Central, falling
  * back one level to its <parent> POM if the artifact doesn't declare
  * <licenses> directly (common — many artifacts inherit it from a parent).
+ * A missing/unresolved version (parent-BOM-managed, the Spring Boot norm)
+ * falls back to the latest Central release — a license proxy consistent
+ * with the npm "latest" approach above.
  */
 async function fetchMavenLicense(groupIdArtifactId: string, version: string | null): Promise<string | null> {
-  if (!version) return null; // unresolved property version (inherited from an unfetched parent's <properties>)
   const [groupId, artifactId] = groupIdArtifactId.split(":");
   if (!groupId || !artifactId) return null;
 
-  const pom = await fetchMavenPom(groupId, artifactId, version);
+  const resolved = version ?? (await fetchMavenLatestVersion(groupId, artifactId));
+  if (!resolved) return null;
+
+  const pom = await fetchMavenPom(groupId, artifactId, resolved);
   if (!pom) return null;
 
   const direct = extractMavenLicenseName(pom);
@@ -492,40 +630,78 @@ async function fetchGoLicense(modulePath: string): Promise<string | null> {
   }
 }
 
+// Cap concurrent registry lookups: a large manifest change would otherwise
+// fire hundreds of simultaneous requests and trip rate limits (GitHub's
+// unauthenticated API allows only 60 req/hr for Go module lookups).
+const LOOKUP_CONCURRENCY = 6;
+
 export async function checkDependencyLicenses(
   changes: DependencyChange[],
 ): Promise<LicenseCheckResult[]> {
-  return Promise.all(
-    changes.map(async (change) => {
-      let license: string | null;
+  // Dedupe lookups — the same dependency can be added to several manifests in
+  // one MR (monorepos, multi-module Maven builds).
+  const licenseByKey = new Map<string, Promise<string | null>>();
+  const lookup = (change: DependencyChange): Promise<string | null> => {
+    const key = `${change.ecosystem}:${change.name}:${change.version ?? ""}`;
+    let pending = licenseByKey.get(key);
+    if (!pending) {
       switch (change.ecosystem) {
         case "npm":
-          license = await fetchNpmLicense(change.name);
+          pending = fetchNpmLicense(change.name);
           break;
         case "pypi":
-          license = await fetchPypiLicense(change.name);
+          pending = fetchPypiLicense(change.name);
           break;
         case "maven":
-          license = await fetchMavenLicense(change.name, change.version);
+          pending = fetchMavenLicense(change.name, change.version);
           break;
         case "go":
-          license = await fetchGoLicense(change.name);
+          pending = fetchGoLicense(change.name);
           break;
       }
-      return { change, license, verdict: classifyLicense(license) };
-    }),
-  );
+      licenseByKey.set(key, pending);
+    }
+    return pending;
+  };
+
+  const results: LicenseCheckResult[] = [];
+  for (let i = 0; i < changes.length; i += LOOKUP_CONCURRENCY) {
+    const batch = changes.slice(i, i + LOOKUP_CONCURRENCY);
+    results.push(
+      ...(await Promise.all(
+        batch.map(async (change) => {
+          const license = await lookup(change);
+          return { change, license, verdict: classifyLicense(license) };
+        }),
+      )),
+    );
+  }
+  return results;
 }
 
 function findDependencyLine(fileContent: string, name: string, ecosystem: Ecosystem): number {
   const lines = fileContent.split("\n");
-  let needle: string;
-  if (ecosystem === "npm") needle = `"${name}"`;
-  else if (ecosystem === "maven") needle = `<artifactId>${name.split(":")[1] ?? name}</artifactId>`;
-  else needle = name.toLowerCase();
 
+  if (ecosystem === "maven") {
+    const [groupId, artifactId] = name.split(":");
+    const needle = `<artifactId>${artifactId ?? name}</artifactId>`;
+    const candidates: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(needle)) candidates.push(i);
+    }
+    // The same artifactId can also appear under <build><plugins> or
+    // <dependencyManagement> — prefer the occurrence adjacent to the
+    // matching <groupId>.
+    for (const i of candidates) {
+      const context = lines.slice(Math.max(0, i - 3), i + 4).join("\n");
+      if (groupId && context.includes(`<groupId>${groupId}</groupId>`)) return i + 1;
+    }
+    return candidates.length > 0 ? candidates[0] + 1 : 1;
+  }
+
+  const needle = ecosystem === "npm" ? `"${name}"` : name.toLowerCase();
   for (let i = 0; i < lines.length; i++) {
-    const line = ecosystem === "npm" || ecosystem === "maven" ? lines[i] : lines[i].toLowerCase();
+    const line = ecosystem === "npm" ? lines[i] : lines[i].toLowerCase();
     if (line.includes(needle)) return i + 1;
   }
   return 1;
@@ -541,21 +717,30 @@ export async function buildLicenseFindings(opts: {
   workspacePath: string;
   baseRef: string;
   headRef?: string;
+  useWorkingTree?: boolean;
 }): Promise<ReviewFinding[]> {
-  const { workspacePath, baseRef, headRef = "HEAD" } = opts;
+  const { workspacePath, baseRef, headRef = "HEAD", useWorkingTree = false } = opts;
 
-  const changes = await findManifestDependencyChanges(workspacePath, baseRef, headRef);
+  const changes = await findManifestDependencyChanges(workspacePath, baseRef, headRef, useWorkingTree);
   if (changes.length === 0) return [];
 
   logger.info(`Checking license(s) for ${changes.length} added/changed dependenc${changes.length === 1 ? "y" : "ies"}`);
   const results = await checkDependencyLicenses(changes);
+
+  // If every lookup across several dependencies came back empty, the registry
+  // endpoints are almost certainly unreachable (air-gapped/proxied CI) — skip
+  // rather than flooding the MR with per-dep "unverified license" findings.
+  if (results.length >= 3 && results.every((r) => r.license === null)) {
+    logger.warn("License check: all registry lookups returned nothing — assuming no network access, skipping");
+    return [];
+  }
 
   const findings: ReviewFinding[] = [];
   for (const result of results) {
     if (result.verdict === "allowed") continue;
 
     const { change, license, verdict } = result;
-    const manifestContent = await readFileAtRef(workspacePath, headRef, change.manifestPath);
+    const manifestContent = await readHeadSide(workspacePath, headRef, change.manifestPath, useWorkingTree);
     const line = manifestContent ? findDependencyLine(manifestContent, change.name, change.ecosystem) : 1;
     const licenseLabel = license ?? "unknown/unspecified";
 

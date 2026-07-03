@@ -1335,6 +1335,7 @@ export async function reviewPr(opts: {
             const licenseFindings = await buildLicenseFindings({
               workspacePath,
               baseRef: licenseCheckBaseRef,
+              useWorkingTree: localMode,
             });
             if (licenseFindings.length > 0) {
               logger.info(`License check: ${licenseFindings.length} finding(s)`);
