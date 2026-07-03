@@ -105,6 +105,11 @@ program
     (val) => parseInt(val, 10),
     1,
   )
+  .option(
+    "--skip-license-check",
+    "Skip flagging dependency license issues in changed package.json/requirements.txt manifests",
+    false,
+  )
   .action(async (prUrl: string | undefined, cmdOpts: Record<string, unknown>) => {
     const verbose = cmdOpts.verbose as boolean;
     const post = cmdOpts.post as boolean;
@@ -125,6 +130,7 @@ program
     const targetBranchOverride = cmdOpts.targetBranch as string | undefined;
     const skipHealthChecks = cmdOpts.skipHealthChecks as boolean;
     const maxRetriesWhenStuck = cmdOpts.maxRetriesWhenStuck as number;
+    const skipLicenseCheck = cmdOpts.skipLicenseCheck as boolean;
 
     if (!localMode && !prUrl) {
       console.error(chalk.red("Error: pr-url is required unless --local is specified"));
@@ -328,6 +334,7 @@ program
         full,
         targetBranchOverride,
         maxRetriesWhenStuck,
+        skipLicenseCheck,
       });
       const reviewText = renderMarkdown(review);
 
