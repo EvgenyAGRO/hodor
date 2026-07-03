@@ -31,6 +31,7 @@ import { buildPrReviewPrompt } from "./prompt.js";
 import { buildJiraContext } from "./jira.js";
 import { deduplicateFindings } from "./duplicate-detector.js";
 import type { Finding, ExistingComment } from "./duplicate-detector.js";
+import { buildLicenseFindings } from "./license-checker.js";
 import {
   getDefaultReasoningEffortForModel,
   mapReasoningEffort,
@@ -760,6 +761,7 @@ export async function reviewPr(opts: {
   full?: boolean;
   targetBranchOverride?: string;
   maxRetriesWhenStuck?: number;
+  skipLicenseCheck?: boolean;
 }): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null; metrics: ReviewMetrics; workspacePath: string }> {
   const {
     prUrl,
@@ -777,6 +779,7 @@ export async function reviewPr(opts: {
     full = false,
     targetBranchOverride,
     maxRetriesWhenStuck = 1,
+    skipLicenseCheck = false,
   } = opts;
 
   logger.info(`Starting PR review for: ${localMode ? "local diff" : prUrl}`);
@@ -992,6 +995,10 @@ export async function reviewPr(opts: {
       const { stdout: headShaRaw } = await exec("git", ["rev-parse", "HEAD"], { cwd: workspacePath });
       headSha = headShaRaw.trim();
     }
+
+    // Base ref for the PR/MR diff, reused for dependency-license checking below.
+    const licenseCheckBaseRef =
+      previousReviewSha ?? diffBaseSha ?? (localMode ? targetBranch : `origin/${targetBranch}`);
 
     // Pre-fetch diff for embedding in prompt (avoids per-file tool calls)
     const MAX_EMBED_BYTES = 200 * 1024; // 200KB
@@ -1321,6 +1328,24 @@ export async function reviewPr(opts: {
             `Location resolution: ${locationStats.corrected} corrected, ${locationStats.confirmed} confirmed, ` +
               `${locationStats.unmatched} unmatched, ${locationStats.noSnippet} without snippet`,
           );
+        }
+
+        if (!skipLicenseCheck) {
+          try {
+            const licenseFindings = await buildLicenseFindings({
+              workspacePath,
+              baseRef: licenseCheckBaseRef,
+            });
+            if (licenseFindings.length > 0) {
+              logger.info(`License check: ${licenseFindings.length} finding(s)`);
+              review.findings.push(...licenseFindings);
+              if (licenseFindings.some((f) => f.priority <= 1)) {
+                review.overall_correctness = "patch is incorrect";
+              }
+            }
+          } catch (err) {
+            logger.warn(`License check failed (continuing without it): ${err instanceof Error ? err.message : err}`);
+          }
         }
 
         logger.info(

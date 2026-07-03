@@ -120,6 +120,7 @@ Local mode:
 | `--prometheus-push` | – | Push review metrics to a Prometheus Pushgateway or VictoriaMetrics import endpoint |
 | `--skip-health-checks` | Off | Skip pre-flight checks (git/LLM key/platform token availability) before starting a review |
 | `--max-retries-when-stuck` | `1` | Full from-scratch retries (fresh agent session) when the agent gets stuck without calling `submit_review` or hits a repeated tool error loop. `0` disables retrying |
+| `--skip-license-check` | Off | Skip flagging dependency license issues in changed `package.json`/`requirements.txt` manifests |
 | `-v, --verbose` | Off | Stream agent reasoning and tool calls |
 
 ## Environment Variables
@@ -152,6 +153,10 @@ If the agent ends a turn without calling `submit_review`, Hodor re-prompts the s
 ### Duplicate Comment Detection
 
 Before posting inline comments on a GitLab MR (`inline`/`hybrid` review style), Hodor fetches every existing note on the MR — from a human reviewer or a prior Hodor run — and skips any finding that fuzzy-matches one: same file, a nearby line (within 5 lines), and either a similar title (≥70% text-similarity) or the finding's title appearing verbatim in an existing comment body. Findings that duplicate an earlier finding in the same batch are also removed. This runs best-effort; if fetching existing notes fails, posting proceeds unfiltered.
+
+### Dependency License Checks
+
+If a PR/MR adds or version-bumps a dependency in `package.json` (npm) or `requirements.txt` (pip), Hodor looks up that dependency's license via the npm registry or PyPI's API and flags it as a finding if the license isn't on a permissive allowlist (MIT, Apache-2.0, BSD-\*, ISC, etc.). Known copyleft/restrictive licenses (GPL/AGPL/LGPL, SSPL, BUSL, Commons-Clause, CC-BY-NC-\*, etc.) are flagged as a P1; licenses that can't be determined are flagged as a P2 asking for manual verification. This is deterministic (no LLM call for the classification itself) and runs on every review unless `--skip-license-check` is set. Best-effort throughout — a registry lookup failure for one package doesn't block the review or the others.
 
 See [docs/MODELS.md](./docs/MODELS.md) for the full model/provider matrix and [docs/OPENROUTER.md](./docs/OPENROUTER.md) for an end-to-end Kimi K2.6 example.
 
