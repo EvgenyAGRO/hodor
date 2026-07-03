@@ -1,0 +1,21 @@
+src/license-checker.ts
+  s_71f46325082e80::t_d1007cc660a3e6 81-83
+tests/license-checker.test.ts
+  s_71f46325082e80::t_34cbf2beb37400 56-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "3589af443f3f956d4f41676153eea7c3c4b25280",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
