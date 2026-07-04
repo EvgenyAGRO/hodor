@@ -14,6 +14,7 @@ import {
   postGitlabMrComment,
   getGitlabMrDiffRefs,
   getGitlabMrDiffLineMap,
+  getGitlabMrChangedFiles,
   createGitlabDraftNote,
   publishGitlabDraftNotesResilient,
   postGitlabCommitStatus,
@@ -467,14 +468,30 @@ export async function postReviewStructured(opts: {
       body += `\n\n\`\`\`suggestion:-0+${span}\n${finding.suggestion}\n\`\`\``;
     }
 
-    // Resolve the note's position from the diff. If the line isn't in the
-    // diff at all, GitLab can't anchor an inline note there — skip it (the
-    // summary still carries the finding) rather than create an unpublishable
-    // draft that would 500 the whole batch.
-    const startLine = finding.code_location.line_range.start;
-    const linePos = diffLineMap.get(relPath)?.get(startLine);
+    // Resolve the note's position from the diff. The model often anchors a
+    // finding a line or two above the changed hunk (e.g. at a method/field
+    // declaration just before the edit). GitLab can only attach an inline note
+    // to a line that's actually in the diff, so if the start line isn't, scan
+    // the rest of the finding's range for the first line that IS — anchoring
+    // there instead of dropping the whole finding to summary-only. Only when
+    // no line in the range is in the diff do we skip (and let the summary
+    // carry it) rather than create an unpublishable draft that 500s the batch.
+    const { start: rangeStart, end: rangeEnd } = finding.code_location.line_range;
+    const fileLineMap = diffLineMap.get(relPath);
+    let anchorLine = rangeStart;
+    let linePos = fileLineMap?.get(rangeStart);
+    if (fileLineMap && !linePos) {
+      for (let ln = rangeStart + 1; ln <= rangeEnd; ln++) {
+        const p = fileLineMap.get(ln);
+        if (p) {
+          anchorLine = ln;
+          linePos = p;
+          break;
+        }
+      }
+    }
     if (diffLineMap.size > 0 && !linePos) {
-      logger.info(`Skipping inline note for "${finding.title}" — ${relPath}:${startLine} is not in the MR diff`);
+      logger.info(`Skipping inline note for "${finding.title}" — ${relPath}:${rangeStart}-${rangeEnd} is not in the MR diff`);
       skippedNotInDiff++;
       continue;
     }
@@ -490,7 +507,7 @@ export async function postReviewStructured(opts: {
         parsed.host,
         {
           filePath: relPath,
-          line: startLine,
+          line: anchorLine,
           oldLine,
           diffRefs,
         },
@@ -1366,10 +1383,21 @@ export async function reviewPr(opts: {
 
         if (!skipLicenseCheck) {
           try {
+            // Scope the license check to the MR's real changed files (GitLab's
+            // authoritative source-vs-target list). Without this, on a CI
+            // merge-ref checkout the local git diff also sees pom.xml/etc.
+            // changes from other MRs already merged into the target branch,
+            // producing license findings for files this MR never touched.
+            let restrictToPaths: string[] | undefined;
+            if (!localMode && platform === "gitlab") {
+              const mrFiles = await getGitlabMrChangedFiles(owner, repo, prNumber, host);
+              if (mrFiles) restrictToPaths = mrFiles;
+            }
             const licenseFindings = await buildLicenseFindings({
               workspacePath,
               baseRef: licenseCheckBaseRef,
               useWorkingTree: localMode,
+              restrictToPaths,
             });
             if (licenseFindings.length > 0) {
               logger.info(`License check: ${licenseFindings.length} finding(s)`);
