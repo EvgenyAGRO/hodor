@@ -730,7 +730,7 @@ export async function buildLicenseFindings(opts: {
 }): Promise<ReviewFinding[]> {
   const { workspacePath, baseRef, headRef = "HEAD", useWorkingTree = false, restrictToPaths } = opts;
 
-  const changes = await findManifestDependencyChanges(
+  let changes = await findManifestDependencyChanges(
     workspacePath,
     baseRef,
     headRef,
@@ -739,13 +739,37 @@ export async function buildLicenseFindings(opts: {
   );
   if (changes.length === 0) return [];
 
+  // Skip first-party/internal dependencies — they aren't published to public
+  // registries, so a license lookup always fails and yields pure "unverified"
+  // noise (e.g. com.coronet:*). Configurable via HODOR_LICENSE_INTERNAL_GROUPS
+  // (comma-separated name/groupId prefixes).
+  const internalPrefixes = (process.env.HODOR_LICENSE_INTERNAL_GROUPS ?? "")
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+  if (internalPrefixes.length > 0) {
+    const before = changes.length;
+    changes = changes.filter((c) => !internalPrefixes.some((p) => c.name.toLowerCase().startsWith(p)));
+    const skipped = before - changes.length;
+    if (skipped > 0) logger.info(`License check: skipped ${skipped} internal dependenc${skipped === 1 ? "y" : "ies"}`);
+    if (changes.length === 0) return [];
+  }
+
   logger.info(`Checking license(s) for ${changes.length} added/changed dependenc${changes.length === 1 ? "y" : "ies"}`);
   const results = await checkDependencyLicenses(changes);
 
-  // If every lookup across several dependencies came back empty, the registry
-  // endpoints are almost certainly unreachable (air-gapped/proxied CI) — skip
+  // "unknown" means we couldn't determine a license — an internal artifact, a
+  // dep on a non-Central/private registry (e.g. JitPack com.github.*), or one
+  // with no declared metadata. These are low-signal and were the dominant
+  // source of review noise, so they're suppressed by default; only genuinely
+  // restrictive (flagged) licenses are reported. Opt back in with
+  // HODOR_LICENSE_REPORT_UNVERIFIED=true.
+  const reportUnverified = process.env.HODOR_LICENSE_REPORT_UNVERIFIED === "true";
+
+  // Only relevant when unverified reporting is on: if every lookup came back
+  // empty, the registries are likely unreachable (air-gapped/proxied CI) — skip
   // rather than flooding the MR with per-dep "unverified license" findings.
-  if (results.length >= 3 && results.every((r) => r.license === null)) {
+  if (reportUnverified && results.length >= 3 && results.every((r) => r.license === null)) {
     logger.warn("License check: all registry lookups returned nothing — assuming no network access, skipping");
     return [];
   }
@@ -753,6 +777,7 @@ export async function buildLicenseFindings(opts: {
   const findings: ReviewFinding[] = [];
   for (const result of results) {
     if (result.verdict === "allowed") continue;
+    if (result.verdict === "unknown" && !reportUnverified) continue;
 
     const { change, license, verdict } = result;
     const manifestContent = await readHeadSide(workspacePath, headRef, change.manifestPath, useWorkingTree);
