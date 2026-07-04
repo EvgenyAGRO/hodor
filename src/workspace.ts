@@ -288,10 +288,35 @@ async function cloneAndCheckoutGitlabMr(
 
   const cloneUrl = `https://${gitlabHost}/${owner}/${repo}.git`;
   logger.info(`Cloning from ${cloneUrl}...`);
+  // Authenticate the clone with GITLAB_TOKEN when available. Without this, a
+  // bare `git clone` of a private repo prompts for credentials and — with no
+  // TTY (CI) — fails instantly with "could not read Username". We only clone
+  // when the CI checkout can't be reused, so this path must self-authenticate.
+  // The token is passed via an in-memory http header (never in the URL/argv)
+  // so it can't leak into logs, error messages, or the on-disk remote.
+  const token = process.env.GITLAB_TOKEN?.trim();
+  // GitLab git-over-HTTPS wants Basic auth (username "oauth2", password = token);
+  // it rejects a Bearer header. The credential is passed as a one-shot `-c`
+  // header so it never touches the URL/argv-visible remote or the cloned
+  // repo's persisted .git/config, unlike embedding it in the clone URL.
+  const basicAuth = token ? Buffer.from(`oauth2:${token}`).toString("base64") : null;
+  const cloneArgs = basicAuth
+    ? ["-c", `http.extraHeader=Authorization: Basic ${basicAuth}`, "clone", cloneUrl, workspace]
+    : ["clone", cloneUrl, workspace];
   try {
-    await exec("git", ["clone", cloneUrl, workspace]);
+    await exec("git", cloneArgs);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    let msg = err instanceof Error ? err.message : String(err);
+    // Defensively redact the credential in case git echoes the -c argument back
+    // in its error (both the raw token and its base64 Basic-auth encoding).
+    if (token) msg = msg.split(token).join("***");
+    if (basicAuth) msg = msg.split(basicAuth).join("***");
+    if (msg.includes("could not read Username") || msg.includes("Authentication failed") || msg.includes("HTTP Basic")) {
+      throw new WorkspaceError(
+        `Failed to clone ${owner}/${repo}: authentication failed. ` +
+        `Set GITLAB_TOKEN with an 'api' (or at least 'read_repository') scope that can access this project.`,
+      );
+    }
     if (msg.includes("Permission denied") || msg.includes("publickey")) {
       throw new WorkspaceError(
         `Failed to clone ${owner}/${repo}: SSH authentication failed. ` +

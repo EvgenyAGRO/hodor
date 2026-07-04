@@ -9,7 +9,7 @@ import type { AgentProgressEvent } from "./agent.js";
 import type { PostCommentResult } from "./types.js";
 import { renderMarkdown } from "./render.js";
 import { pushMetrics } from "./metrics.js";
-import { setLogLevel } from "./utils/logger.js";
+import { setLogLevel, writeStdoutSync, writeStderrSync } from "./utils/logger.js";
 import { runHealthChecks, allChecksPassed, failedChecks, warningChecks } from "./health.js";
 
 const program = new Command();
@@ -111,6 +111,14 @@ program
     false,
   )
   .action(async (prUrl: string | undefined, cmdOpts: Record<string, unknown>) => {
+    // Route all console output through synchronous fd writes. Bun buffers
+    // process.stdout/stderr to pipes/files and does not flush on process.exit(),
+    // so a fast failure would otherwise produce a completely empty CI log
+    // (which is exactly what hid a transient failure on a real MR). Synchronous
+    // writes can't be buffered away, so the failure reason is always captured.
+    console.log = (...args: unknown[]): void => writeStdoutSync(`${args.map(String).join(" ")}\n`);
+    console.error = (...args: unknown[]): void => writeStderrSync(`${args.map(String).join(" ")}\n`);
+
     const verbose = cmdOpts.verbose as boolean;
     const post = cmdOpts.post as boolean;
     const model = cmdOpts.model as string;
@@ -178,7 +186,7 @@ program
     }
 
     const log = console.log;
-    const logStream = process.stdout;
+    const logStream = { write: (s: string): void => writeStdoutSync(s) };
 
     const toolIcons: Record<string, string> = {
       bash: "$",
@@ -195,7 +203,7 @@ program
 
     /** Write inline text (no newline) for streaming deltas */
     function streamWrite(text: string): void {
-      process.stderr.write(text);
+      writeStderrSync(text);
     }
 
     function handleEvent(event: AgentProgressEvent): void {
