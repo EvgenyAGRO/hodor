@@ -13,8 +13,9 @@ import {
   fetchGitlabMrInfo,
   postGitlabMrComment,
   getGitlabMrDiffRefs,
+  getGitlabMrDiffLineMap,
   createGitlabDraftNote,
-  bulkPublishGitlabDraftNotes,
+  publishGitlabDraftNotesResilient,
   postGitlabCommitStatus,
   listHodorDiscussions,
   listAllMrNotes,
@@ -437,10 +438,17 @@ export async function postReviewStructured(opts: {
 
   let inlineCount = 0;
   let failedCount = 0;
+  let skippedNotInDiff = 0;
   let summaryPosted = false;
   let draftsPublished = false;
   let statusPosted = false;
   const postingErrors: string[] = [];
+
+  // Build a per-file map of which new-file lines are in the diff and whether
+  // each is an added or context line. GitLab only anchors inline notes on
+  // lines within the diff, and a context (unchanged) line needs old_line as
+  // well as new_line — otherwise the draft is created but bulk_publish 500s.
+  const diffLineMap = await getGitlabMrDiffLineMap(parsed.owner, parsed.repo, parsed.prNumber, parsed.host);
 
   for (const finding of dedupedReview.findings) {
     const relPath = formatLocationRelative(finding.code_location, workspacePath);
@@ -459,6 +467,20 @@ export async function postReviewStructured(opts: {
       body += `\n\n\`\`\`suggestion:-0+${span}\n${finding.suggestion}\n\`\`\``;
     }
 
+    // Resolve the note's position from the diff. If the line isn't in the
+    // diff at all, GitLab can't anchor an inline note there — skip it (the
+    // summary still carries the finding) rather than create an unpublishable
+    // draft that would 500 the whole batch.
+    const startLine = finding.code_location.line_range.start;
+    const linePos = diffLineMap.get(relPath)?.get(startLine);
+    if (diffLineMap.size > 0 && !linePos) {
+      logger.info(`Skipping inline note for "${finding.title}" — ${relPath}:${startLine} is not in the MR diff`);
+      skippedNotInDiff++;
+      continue;
+    }
+    // Added line -> new_line only; context line -> both old_line and new_line.
+    const oldLine = linePos && !linePos.added ? linePos.oldLine : undefined;
+
     try {
       await createGitlabDraftNote(
         parsed.owner,
@@ -468,7 +490,8 @@ export async function postReviewStructured(opts: {
         parsed.host,
         {
           filePath: relPath,
-          line: finding.code_location.line_range.start,
+          line: startLine,
+          oldLine,
           diffRefs,
         },
       );
@@ -481,7 +504,11 @@ export async function postReviewStructured(opts: {
     }
   }
 
-  logger.info(`Created ${inlineCount} inline draft note(s)${failedCount > 0 ? ` (${failedCount} failed)` : ""}`);
+  logger.info(
+    `Created ${inlineCount} inline draft note(s)` +
+      `${failedCount > 0 ? ` (${failedCount} failed)` : ""}` +
+      `${skippedNotInDiff > 0 ? ` (${skippedNotInDiff} not in diff → summary only)` : ""}`,
+  );
 
   if (reviewStyle === "hybrid" || reviewStyle === undefined) {
     let summaryBody = renderSummaryMarkdown(dedupedReview);
@@ -506,17 +533,24 @@ export async function postReviewStructured(opts: {
 
   if (inlineCount > 0) {
     try {
-      await bulkPublishGitlabDraftNotes(
+      const { published, failed } = await publishGitlabDraftNotesResilient(
         parsed.owner,
         parsed.repo,
         parsed.prNumber,
         parsed.host,
       );
-      logger.info("Published all draft notes");
-      draftsPublished = true;
+      if (failed > 0) {
+        logger.warn(`Published draft notes with ${failed} failure(s)`);
+        postingErrors.push(`${failed} inline note(s) failed to publish`);
+      } else {
+        logger.info("Published all draft notes");
+      }
+      // Consider it published if at least one note went out (published === -1
+      // means the bulk call published them all in one shot).
+      draftsPublished = published !== 0;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.warn(`Failed to bulk publish draft notes: ${msg}`);
+      logger.warn(`Failed to publish draft notes: ${msg}`);
       postingErrors.push(`draft publish: ${msg}`);
     }
   }
