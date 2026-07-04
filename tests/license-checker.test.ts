@@ -665,4 +665,70 @@ describe("buildLicenseFindings", () => {
     const findings = await mod.buildLicenseFindings({ workspacePath: "/workspace", baseRef: "base" });
     expect(findings).toEqual([]);
   });
+
+  it("suppresses unverified/unknown findings by default (only flags restrictive licenses)", async () => {
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "package.json\n", stderr: "" };
+      const ref = args[1];
+      if (ref === "base:package.json") return { stdout: JSON.stringify({ dependencies: {} }), stderr: "" };
+      if (ref === "HEAD:package.json") return { stdout: JSON.stringify({ dependencies: { "mystery-pkg": "^1.0.0" } }), stderr: "" };
+      throw new Error("not found");
+    });
+    // Registry returns no license -> verdict "unknown".
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+
+    const findings = await mod.buildLicenseFindings({ workspacePath: "/workspace", baseRef: "base" });
+    expect(findings).toEqual([]); // unknown suppressed by default
+  });
+
+  it("includes unverified findings when HODOR_LICENSE_REPORT_UNVERIFIED=true", async () => {
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "package.json\n", stderr: "" };
+      const ref = args[1];
+      if (ref === "base:package.json") return { stdout: JSON.stringify({ dependencies: {} }), stderr: "" };
+      if (ref === "HEAD:package.json") return { stdout: JSON.stringify({ dependencies: { "mystery-pkg": "^1.0.0" } }), stderr: "" };
+      throw new Error("not found");
+    });
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+
+    process.env.HODOR_LICENSE_REPORT_UNVERIFIED = "true";
+    try {
+      const findings = await mod.buildLicenseFindings({ workspacePath: "/workspace", baseRef: "base" });
+      expect(findings).toHaveLength(1);
+      expect(findings[0].priority).toBe(2);
+      expect(findings[0].title).toContain("unverified");
+    } finally {
+      delete process.env.HODOR_LICENSE_REPORT_UNVERIFIED;
+    }
+  });
+
+  it("skips internal dependencies matching HODOR_LICENSE_INTERNAL_GROUPS (no lookup, no finding)", async () => {
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "pom.xml\n", stderr: "" };
+      const ref = args[1];
+      if (ref === "base:pom.xml") return { stdout: "<project><dependencies></dependencies></project>", stderr: "" };
+      if (ref === "HEAD:pom.xml") {
+        return {
+          stdout:
+            "<project><dependencies><dependency><groupId>com.coronet</groupId><artifactId>iplookup-sdk</artifactId><version>1.0.0</version></dependency></dependencies></project>",
+          stderr: "",
+        };
+      }
+      throw new Error("not found");
+    });
+
+    process.env.HODOR_LICENSE_INTERNAL_GROUPS = "com.coronet";
+    process.env.HODOR_LICENSE_REPORT_UNVERIFIED = "true"; // even with unverified on, internal is skipped
+    try {
+      const findings = await mod.buildLicenseFindings({ workspacePath: "/workspace", baseRef: "base" });
+      expect(findings).toEqual([]);
+      expect(mockFetch).not.toHaveBeenCalled(); // skipped before any lookup
+    } finally {
+      delete process.env.HODOR_LICENSE_INTERNAL_GROUPS;
+      delete process.env.HODOR_LICENSE_REPORT_UNVERIFIED;
+    }
+  });
 });
