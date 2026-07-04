@@ -1,0 +1,21 @@
+src/gitlab.ts
+  s_71f46325082e80::t_bb4c317baec46c 429-435
+tests/gitlab.test.ts
+  s_71f46325082e80::t_74da4ba088bca6 42-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e6cf4d5b5eb11d94f4bb73fc9ae098c99e7cc5e9",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
