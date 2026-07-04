@@ -1,0 +1,29 @@
+src/agent.ts
+  s_71f46325082e80::t_850c308d570472 470-483,493-494,507-511
+  s_71f46325082e80::t_54300e26078143 441,447-451
+  s_71f46325082e80::t_6c318510819f30 536,542-550,553
+  s_71f46325082e80::t_0de9c3036c40be 16,18
+  s_71f46325082e80::t_6ab14f9e0e65f1 452
+src/gitlab.ts
+  s_71f46325082e80::t_d818e7f8c5afb1 398-482
+  s_71f46325082e80::t_79c760e28c8320 489,500,509-513
+  s_71f46325082e80::t_ad3de409a4f300 557-612
+tests/gitlab.test.ts
+  s_71f46325082e80::t_44ec5997a7c9c3 2-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0e5ff2c849f6e0543bab98b9bf94022cc0de8382",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
