@@ -420,6 +420,7 @@ export async function findManifestDependencyChanges(
   baseRef: string,
   headRef = "HEAD",
   useWorkingTree = false,
+  restrictToPaths?: Set<string>,
 ): Promise<DependencyChange[]> {
   // Resolve the merge base so a target branch that advanced after this branch
   // forked doesn't leak its own dependency changes into the comparison.
@@ -449,6 +450,11 @@ export async function findManifestDependencyChanges(
 
   const changes: DependencyChange[] = [];
   for (const path of changedFiles) {
+    // On a CI merge-ref checkout, `git diff base HEAD` also includes files
+    // already merged into the target branch by other MRs. When the caller
+    // supplies the MR's authoritative changed-file list, honor it so we only
+    // flag dependencies this MR actually touched.
+    if (restrictToPaths && !restrictToPaths.has(path)) continue;
     const basename = path.split("/").pop() ?? path;
     const manifest = MANIFEST_PARSERS[basename];
     if (!manifest) continue;
@@ -720,10 +726,17 @@ export async function buildLicenseFindings(opts: {
   baseRef: string;
   headRef?: string;
   useWorkingTree?: boolean;
+  restrictToPaths?: string[];
 }): Promise<ReviewFinding[]> {
-  const { workspacePath, baseRef, headRef = "HEAD", useWorkingTree = false } = opts;
+  const { workspacePath, baseRef, headRef = "HEAD", useWorkingTree = false, restrictToPaths } = opts;
 
-  const changes = await findManifestDependencyChanges(workspacePath, baseRef, headRef, useWorkingTree);
+  const changes = await findManifestDependencyChanges(
+    workspacePath,
+    baseRef,
+    headRef,
+    useWorkingTree,
+    restrictToPaths ? new Set(restrictToPaths) : undefined,
+  );
   if (changes.length === 0) return [];
 
   logger.info(`Checking license(s) for ${changes.length} added/changed dependenc${changes.length === 1 ? "y" : "ies"}`);

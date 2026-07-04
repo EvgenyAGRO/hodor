@@ -373,6 +373,46 @@ describe("findManifestDependencyChanges", () => {
     ]);
   });
 
+  it("honors restrictToPaths, ignoring manifests outside the MR's real changed files", async () => {
+    // Simulates a CI merge-ref checkout where `git diff` sees a pom.xml from
+    // another module (merged into the target by a different MR). Only the
+    // manifest in the MR's authoritative file list should be checked.
+    execMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === "merge-base") return { stdout: "base", stderr: "" };
+      if (args[0] === "diff") return { stdout: "mine/pom.xml\nother-module/pom.xml\n", stderr: "" };
+      const ref = args[1];
+      if (ref === "base:mine/pom.xml") return { stdout: "<project><dependencies></dependencies></project>", stderr: "" };
+      if (ref === "HEAD:mine/pom.xml") {
+        return {
+          stdout:
+            "<project><dependencies><dependency><groupId>com.example</groupId><artifactId>mine</artifactId><version>1.0.0</version></dependency></dependencies></project>",
+          stderr: "",
+        };
+      }
+      // other-module/pom.xml would also show a change, but it's not in the MR.
+      if (ref === "base:other-module/pom.xml") return { stdout: "<project><dependencies></dependencies></project>", stderr: "" };
+      if (ref === "HEAD:other-module/pom.xml") {
+        return {
+          stdout:
+            "<project><dependencies><dependency><groupId>com.example</groupId><artifactId>other</artifactId><version>2.0.0</version></dependency></dependencies></project>",
+          stderr: "",
+        };
+      }
+      throw new Error("not found");
+    });
+
+    const changes = await mod.findManifestDependencyChanges(
+      "/workspace",
+      "base",
+      "HEAD",
+      false,
+      new Set(["mine/pom.xml"]),
+    );
+    expect(changes).toEqual([
+      { ecosystem: "maven", name: "com.example:mine", version: "1.0.0", manifestPath: "mine/pom.xml" },
+    ]);
+  });
+
   it("returns nothing (and does not flood) when the base ref is unreachable", async () => {
     // Shallow CI clone: merge-base and diff both fail. Must skip, not treat
     // the whole HEAD manifest as newly added.

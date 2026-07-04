@@ -480,6 +480,44 @@ export async function getGitlabMrDiffLineMap(
   return result;
 }
 
+/**
+ * The set of files an MR actually changes, per GitLab's own MR diff. This is
+ * the authoritative source-vs-target file list — unlike a local `git diff`
+ * against the merge-base, which on a CI merge-ref checkout also sweeps in
+ * unrelated changes already merged into the target branch. Used to scope the
+ * dependency-license check to the MR's real manifests. Returns null on failure
+ * so callers can fall back to the unscoped behavior.
+ */
+export async function getGitlabMrChangedFiles(
+  owner: string,
+  repo: string,
+  mrNumber: number | string,
+  host?: string | null,
+): Promise<string[] | null> {
+  const encoded = encodedProjectPath(owner, repo);
+  const env = glabEnv(host);
+  const paths = new Set<string>();
+  try {
+    for (let page = 1; page <= 20; page++) {
+      const changes = await execJson<Array<Record<string, unknown>>>(
+        "glab",
+        ["api", `projects/${encoded}/merge_requests/${mrNumber}/diffs?per_page=50&page=${page}`],
+        { env },
+      );
+      if (!Array.isArray(changes) || changes.length === 0) break;
+      for (const change of changes) {
+        if (typeof change.new_path === "string") paths.add(change.new_path);
+        if (typeof change.old_path === "string") paths.add(change.old_path);
+      }
+      if (changes.length < 50) break;
+    }
+    return [...paths];
+  } catch (err) {
+    logger.warn(`Failed to fetch MR changed files: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
 export async function createGitlabDraftNote(
   owner: string,
   repo: string,
