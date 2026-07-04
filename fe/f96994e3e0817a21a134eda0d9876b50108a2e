@@ -1,0 +1,29 @@
+tests/license-checker.test.ts
+  s_71f46325082e80::t_47fd96df95c1d0 376-415
+src/gitlab.ts
+  s_71f46325082e80::t_4d6124c569e4b9 483-520
+src/license-checker.ts
+  s_71f46325082e80::t_3d744a4b35df6c 423
+  s_71f46325082e80::t_01ea6da48fd6ef 729,731-739
+  s_71f46325082e80::t_e725e44504de11 453-457
+src/agent.ts
+  s_71f46325082e80::t_06b1f7e2520dbe 17
+  s_71f46325082e80::t_1fffb2808dabfe 471-492,494,510
+  s_71f46325082e80::t_aa125dca7b4bc2 1386-1395,1400
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fef96994e3e0817a21a134eda0d9876b50108a2e",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
