@@ -395,13 +395,98 @@ export async function postGitlabInlineComment(
   }
 }
 
+export interface DiffLinePosition {
+  /** Added line (present only on the new side) — position uses new_line only. */
+  added: boolean;
+  /** Old-file line number for a context (unchanged) line — required alongside
+   * new_line for GitLab to anchor a note on an unchanged line. */
+  oldLine: number | null;
+}
+
+/**
+ * Parse a unified-diff body into a map of new-file line number -> position
+ * info. GitLab only accepts inline notes on lines that appear in the diff,
+ * and an unchanged (context) line must carry BOTH old_line and new_line — a
+ * new_line-only position on a context line is accepted when the draft is
+ * created but makes bulk_publish fail with a 500. This map lets the caller
+ * build the correct position (and skip lines not in the diff at all).
+ */
+export function parseDiffNewLineMap(diff: string): Map<number, DiffLinePosition> {
+  const map = new Map<number, DiffLinePosition>();
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  for (const line of diff.split("\n")) {
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      oldLine = parseInt(hunk[1], 10);
+      newLine = parseInt(hunk[2], 10);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (line.startsWith("+")) {
+      map.set(newLine, { added: true, oldLine: null });
+      newLine++;
+    } else if (line.startsWith("-")) {
+      oldLine++;
+    } else {
+      // Context line (leading space, or an empty line inside a hunk).
+      map.set(newLine, { added: false, oldLine });
+      oldLine++;
+      newLine++;
+    }
+  }
+  return map;
+}
+
+/**
+ * Fetch an MR's diffs and build a per-file map of new-line -> position info,
+ * used to position inline notes correctly (see parseDiffNewLineMap). Keyed by
+ * the file's new_path. Returns an empty map on failure (callers fall back to
+ * the previous new_line-only behavior).
+ */
+export async function getGitlabMrDiffLineMap(
+  owner: string,
+  repo: string,
+  mrNumber: number | string,
+  host?: string | null,
+): Promise<Map<string, Map<number, DiffLinePosition>>> {
+  const encoded = encodedProjectPath(owner, repo);
+  const env = glabEnv(host);
+  const result = new Map<string, Map<number, DiffLinePosition>>();
+  try {
+    // /diffs is paginated; pull enough pages to cover large MRs.
+    for (let page = 1; page <= 20; page++) {
+      const changes = await execJson<Array<Record<string, unknown>>>(
+        "glab",
+        ["api", `projects/${encoded}/merge_requests/${mrNumber}/diffs?per_page=50&page=${page}`],
+        { env },
+      );
+      if (!Array.isArray(changes) || changes.length === 0) break;
+      for (const change of changes) {
+        const newPath = change.new_path as string | undefined;
+        const diff = change.diff as string | undefined;
+        if (newPath && typeof diff === "string") {
+          result.set(newPath, parseDiffNewLineMap(diff));
+        }
+      }
+      if (changes.length < 50) break;
+    }
+  } catch (err) {
+    logger.warn(`Failed to fetch MR diff line map: ${err instanceof Error ? err.message : err}`);
+  }
+  return result;
+}
+
 export async function createGitlabDraftNote(
   owner: string,
   repo: string,
   mrNumber: number | string,
   body: string,
   host?: string | null,
-  opts?: { filePath?: string; line?: number; diffRefs?: DiffRefs },
+  opts?: { filePath?: string; line?: number; oldLine?: number | null; diffRefs?: DiffRefs },
 ): Promise<Record<string, unknown>> {
   const encoded = encodedProjectPath(owner, repo);
   const env = glabEnv(host);
@@ -412,7 +497,7 @@ export async function createGitlabDraftNote(
   };
 
   if (opts?.filePath && typeof opts.line === "number" && opts.diffRefs) {
-    payload.position = {
+    const position: Record<string, unknown> = {
       base_sha: opts.diffRefs.base_sha,
       head_sha: opts.diffRefs.head_sha,
       start_sha: opts.diffRefs.start_sha,
@@ -421,6 +506,11 @@ export async function createGitlabDraftNote(
       new_path: opts.filePath,
       new_line: opts.line,
     };
+    // A context (unchanged) line must carry old_line as well — without it,
+    // GitLab accepts the draft but 500s the whole bulk_publish. Added lines
+    // must NOT set old_line.
+    if (typeof opts.oldLine === "number") position.old_line = opts.oldLine;
+    payload.position = position;
   }
 
   try {
@@ -462,6 +552,62 @@ export async function bulkPublishGitlabDraftNotes(
     const msg = err instanceof Error ? err.message : String(err);
     throw new GitLabAPIError(`Failed to bulk publish draft notes for MR !${mrNumber}: ${msg}`);
   }
+}
+
+/**
+ * Publish all draft notes, resiliently: try bulk_publish first, and if that
+ * fails (GitLab 500s the entire batch if any single note has an unpublishable
+ * position), fall back to publishing each draft note individually so one bad
+ * note can't sink the valid ones. Returns how many published/failed.
+ */
+export async function publishGitlabDraftNotesResilient(
+  owner: string,
+  repo: string,
+  mrNumber: number | string,
+  host?: string | null,
+): Promise<{ published: number; failed: number }> {
+  try {
+    await bulkPublishGitlabDraftNotes(owner, repo, mrNumber, host);
+    return { published: -1, failed: 0 }; // -1: all published in one shot
+  } catch (bulkErr) {
+    logger.warn(
+      `Bulk publish failed, retrying draft notes individually: ${bulkErr instanceof Error ? bulkErr.message : bulkErr}`,
+    );
+  }
+
+  const encoded = encodedProjectPath(owner, repo);
+  const env = glabEnv(host);
+  let drafts: Array<Record<string, unknown>>;
+  try {
+    drafts = await execJson<Array<Record<string, unknown>>>(
+      "glab",
+      ["api", `projects/${encoded}/merge_requests/${mrNumber}/draft_notes?per_page=100`],
+      { env },
+    );
+  } catch (err) {
+    throw new GitLabAPIError(
+      `Failed to list draft notes for MR !${mrNumber}: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  let published = 0;
+  let failed = 0;
+  for (const draft of Array.isArray(drafts) ? drafts : []) {
+    const id = draft.id;
+    if (typeof id !== "number" && typeof id !== "string") continue;
+    try {
+      await exec(
+        "glab",
+        ["api", `projects/${encoded}/merge_requests/${mrNumber}/draft_notes/${id}/publish`, "--method", "PUT"],
+        { env },
+      );
+      published++;
+    } catch (err) {
+      failed++;
+      logger.warn(`Failed to publish draft note ${id}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  return { published, failed };
 }
 
 type GitlabCommitStatusState = "pending" | "running" | "success" | "failed" | "canceled";

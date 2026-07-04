@@ -1,5 +1,51 @@
 import { describe, it, expect } from "vitest";
-import { parseGlabPaginatedJson, summarizeGitlabNotes } from "../src/gitlab.js";
+import { parseGlabPaginatedJson, summarizeGitlabNotes, parseDiffNewLineMap } from "../src/gitlab.js";
+
+describe("parseDiffNewLineMap", () => {
+  it("marks added lines as added (new_line only) and context lines with old_line", () => {
+    // Added a line between two context lines. Old file: A,B; new file: A,X,B.
+    const diff = ["@@ -1,2 +1,3 @@", " A", "+X", " B"].join("\n");
+    const map = parseDiffNewLineMap(diff);
+    expect(map.get(1)).toEqual({ added: false, oldLine: 1 }); // context "A"
+    expect(map.get(2)).toEqual({ added: true, oldLine: null }); // added "X"
+    expect(map.get(3)).toEqual({ added: false, oldLine: 2 }); // context "B" (old line 2)
+  });
+
+  it("advances old_line past removed lines so context old_line stays correct", () => {
+    // Old: A,B,C ; removed B ; new: A,C
+    const diff = ["@@ -1,3 +1,2 @@", " A", "-B", " C"].join("\n");
+    const map = parseDiffNewLineMap(diff);
+    expect(map.get(1)).toEqual({ added: false, oldLine: 1 }); // "A"
+    expect(map.get(2)).toEqual({ added: false, oldLine: 3 }); // "C" is old line 3 (B was 2)
+    expect(map.has(3)).toBe(false); // nothing on new line 3
+  });
+
+  it("handles multiple hunks and does not map lines outside any hunk", () => {
+    const diff = [
+      "@@ -10,2 +10,3 @@",
+      " ctx10",
+      "+new11",
+      " ctx12",
+      "@@ -50,1 +51,2 @@",
+      "+new51",
+      " ctx52",
+    ].join("\n");
+    const map = parseDiffNewLineMap(diff);
+    expect(map.get(10)).toEqual({ added: false, oldLine: 10 });
+    expect(map.get(11)).toEqual({ added: true, oldLine: null });
+    expect(map.get(12)).toEqual({ added: false, oldLine: 11 });
+    expect(map.get(51)).toEqual({ added: true, oldLine: null });
+    expect(map.get(52)).toEqual({ added: false, oldLine: 50 });
+    expect(map.has(20)).toBe(false); // between hunks, not in the diff
+  });
+
+  it("ignores file headers and the no-newline marker", () => {
+    const diff = ["--- a/f", "+++ b/f", "@@ -1 +1 @@", "-old", "+new", "\\ No newline at end of file"].join("\n");
+    const map = parseDiffNewLineMap(diff);
+    expect(map.get(1)).toEqual({ added: true, oldLine: null });
+    expect(map.size).toBe(1);
+  });
+});
 
 describe("parseGlabPaginatedJson", () => {
   it("parses a single page", () => {
