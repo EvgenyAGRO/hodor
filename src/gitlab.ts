@@ -426,6 +426,13 @@ export function parseDiffNewLineMap(diff: string): Map<number, DiffLinePosition>
     }
     if (!inHunk || line.startsWith("+++") || line.startsWith("---")) continue;
     if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    // A valid unified-diff content line always carries a 1-char prefix
+    // (" ", "+" or "-") — even an empty line: an empty context line is " "
+    // and an empty added line is "+". A zero-length line is therefore never
+    // real content, only the trailing artifact of splitting a diff that ends
+    // in a newline. Skipping it avoids appending a phantom context entry with
+    // a bogus line number (e.g. oldLine 0 in a new-file hunk).
+    if (line === "") continue;
     if (line.startsWith("+")) {
       map.set(newLine, { added: true, oldLine: null });
       newLine++;
