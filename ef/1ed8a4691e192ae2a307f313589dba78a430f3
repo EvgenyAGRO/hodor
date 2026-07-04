@@ -1,0 +1,31 @@
+src/cli.ts
+  s_71f46325082e80::t_2df28e1ee1b0f3 189
+  s_71f46325082e80::t_c204bdc897520d 12
+  s_71f46325082e80::t_08388293a40407 114-121
+  s_71f46325082e80::t_f745eeeddfa7f3 206
+src/utils/logger.ts
+  s_71f46325082e80::t_c1255843bccdff 56,61,66,71
+  s_71f46325082e80::t_349a72244ee7fa 1,6-21
+  s_71f46325082e80::t_3c5f8a458637f8 23-31
+  s_71f46325082e80::t_c750e6d9756e4d 22
+src/workspace.ts
+  s_71f46325082e80::t_e2e1b86a1a02e4 291-297,305,307,314-319
+  s_71f46325082e80::t_d5a782354c3be9 298-304
+  s_71f46325082e80::t_0f0d86837faeb6 309-313
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ef1ed8a4691e192ae2a307f313589dba78a430f3",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}
