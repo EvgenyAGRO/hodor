@@ -1,0 +1,20 @@
+src/agent.ts
+  s_71f46325082e80::t_05bb6b58be1385 1240-1252
+  s_71f46325082e80::t_845a1fc29756ee 1253,1255-1265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a87e8fa1e0b6aba2d780da9b2fd1949a957b529f",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
