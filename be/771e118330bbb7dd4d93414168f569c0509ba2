@@ -1,0 +1,23 @@
+tsup.config.ts
+  s_71f46325082e80::t_f6b426fbdf39ea 4
+src/cli.ts
+  s_71f46325082e80::t_bd5ab08e07ee4a 3-26,28-56
+src/cli-main.ts
+  s_71f46325082e80::t_11578541828b40 1-459
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "be771e118330bbb7dd4d93414168f569c0509ba2",
+  "prompts": {},
+  "sessions": {
+    "s_71f46325082e80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3681948a-496a-47e8-8d9a-0ba8c692434d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
