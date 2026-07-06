@@ -39,6 +39,28 @@ describe("parseDiffNewLineMap", () => {
     expect(map.has(20)).toBe(false); // between hunks, not in the diff
   });
 
+  it("does not add a phantom trailing entry for a new-file diff ending in a newline", () => {
+    // New file: `@@ -0,0 +1,3 @@`, all additions, diff ends with "\n" so
+    // split() yields a trailing "". That must not become a context line with
+    // oldLine 0 one past the last real line.
+    const diff = ["@@ -0,0 +1,3 @@", "+line1", "+", "+line3", ""].join("\n");
+    const map = parseDiffNewLineMap(diff);
+    expect(map.get(1)).toEqual({ added: true, oldLine: null });
+    expect(map.get(2)).toEqual({ added: true, oldLine: null }); // empty added line "+"
+    expect(map.get(3)).toEqual({ added: true, oldLine: null });
+    expect(map.has(4)).toBe(false); // no phantom entry
+    expect(map.size).toBe(3);
+  });
+
+  it("preserves empty context lines (space-prefixed) while ignoring blank artifacts", () => {
+    const diff = ["@@ -1,3 +1,3 @@", " a", " ", "+b", "-c", ""].join("\n");
+    const map = parseDiffNewLineMap(diff);
+    expect(map.get(1)).toEqual({ added: false, oldLine: 1 }); // "a"
+    expect(map.get(2)).toEqual({ added: false, oldLine: 2 }); // empty context " "
+    expect(map.get(3)).toEqual({ added: true, oldLine: null }); // "+b"
+    expect(map.has(4)).toBe(false);
+  });
+
   it("ignores file headers and the no-newline marker", () => {
     const diff = ["--- a/f", "+++ b/f", "@@ -1 +1 @@", "-old", "+new", "\\ No newline at end of file"].join("\n");
     const map = parseDiffNewLineMap(diff);

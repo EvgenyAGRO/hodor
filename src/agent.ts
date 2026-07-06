@@ -14,6 +14,7 @@ import {
   postGitlabMrComment,
   getGitlabMrDiffRefs,
   getGitlabMrDiffLineMap,
+  getGitlabMrChangedFiles,
   createGitlabDraftNote,
   publishGitlabDraftNotesResilient,
   postGitlabCommitStatus,
@@ -467,14 +468,30 @@ export async function postReviewStructured(opts: {
       body += `\n\n\`\`\`suggestion:-0+${span}\n${finding.suggestion}\n\`\`\``;
     }
 
-    // Resolve the note's position from the diff. If the line isn't in the
-    // diff at all, GitLab can't anchor an inline note there — skip it (the
-    // summary still carries the finding) rather than create an unpublishable
-    // draft that would 500 the whole batch.
-    const startLine = finding.code_location.line_range.start;
-    const linePos = diffLineMap.get(relPath)?.get(startLine);
+    // Resolve the note's position from the diff. The model often anchors a
+    // finding a line or two above the changed hunk (e.g. at a method/field
+    // declaration just before the edit). GitLab can only attach an inline note
+    // to a line that's actually in the diff, so if the start line isn't, scan
+    // the rest of the finding's range for the first line that IS — anchoring
+    // there instead of dropping the whole finding to summary-only. Only when
+    // no line in the range is in the diff do we skip (and let the summary
+    // carry it) rather than create an unpublishable draft that 500s the batch.
+    const { start: rangeStart, end: rangeEnd } = finding.code_location.line_range;
+    const fileLineMap = diffLineMap.get(relPath);
+    let anchorLine = rangeStart;
+    let linePos = fileLineMap?.get(rangeStart);
+    if (fileLineMap && !linePos) {
+      for (let ln = rangeStart + 1; ln <= rangeEnd; ln++) {
+        const p = fileLineMap.get(ln);
+        if (p) {
+          anchorLine = ln;
+          linePos = p;
+          break;
+        }
+      }
+    }
     if (diffLineMap.size > 0 && !linePos) {
-      logger.info(`Skipping inline note for "${finding.title}" — ${relPath}:${startLine} is not in the MR diff`);
+      logger.info(`Skipping inline note for "${finding.title}" — ${relPath}:${rangeStart}-${rangeEnd} is not in the MR diff`);
       skippedNotInDiff++;
       continue;
     }
@@ -490,7 +507,7 @@ export async function postReviewStructured(opts: {
         parsed.host,
         {
           filePath: relPath,
-          line: startLine,
+          line: anchorLine,
           oldLine,
           diffRefs,
         },
@@ -1220,16 +1237,32 @@ export async function reviewPr(opts: {
         });
         activeSession = session;
 
-        // Inject Bedrock cost allocation tags into stream requests
-        if (bedrockTags && parsed.provider === "amazon-bedrock") {
-          type AgentWithStream = { agent: { streamFn: (...args: unknown[]) => unknown } };
+        // Pin sampling temperature to 0 (env-overridable) so reviews are
+        // deterministic and consistent run-to-run. Without this the provider's
+        // default sampling (~1.0 for many models) makes each run explore
+        // differently and surface a different subset of findings. Skipped for
+        // models that don't support a temperature param (some reasoning models
+        // reject it). Also injects Bedrock cost tags when applicable — one hook.
+        const tempEnv = process.env.HODOR_TEMPERATURE;
+        const temperature = tempEnv !== undefined && tempEnv.trim() !== "" ? Number(tempEnv) : 0;
+        const modelSupportsTemp =
+          (piModel as { supportsTemperature?: boolean }).supportsTemperature !== false &&
+          Number.isFinite(temperature);
+        const needsBedrockTags = Boolean(bedrockTags) && parsed.provider === "amazon-bedrock";
+        if (modelSupportsTemp || needsBedrockTags) {
+          type AgentWithStream = { agent?: { streamFn?: (...args: unknown[]) => unknown } };
           const agent = (session as unknown as AgentWithStream).agent;
-          const originalStreamFn = agent.streamFn;
-          agent.streamFn = (...args: unknown[]) => {
-            const options = (args[2] ?? {}) as Record<string, unknown>;
-            return originalStreamFn(args[0], args[1], { ...options, requestMetadata: bedrockTags });
-          };
-          logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
+          if (agent && typeof agent.streamFn === "function") {
+            const originalStreamFn = agent.streamFn.bind(agent);
+            agent.streamFn = (...args: unknown[]) => {
+              const options = { ...((args[2] ?? {}) as Record<string, unknown>) };
+              if (modelSupportsTemp && options.temperature === undefined) options.temperature = temperature;
+              if (needsBedrockTags) options.requestMetadata = bedrockTags;
+              return originalStreamFn(args[0], args[1], options);
+            };
+            if (modelSupportsTemp) logger.info(`Sampling temperature pinned to ${temperature} for deterministic review`);
+            if (needsBedrockTags) logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
+          }
         }
 
         // Subscribe to agent events for progress + metrics tracking
@@ -1366,10 +1399,21 @@ export async function reviewPr(opts: {
 
         if (!skipLicenseCheck) {
           try {
+            // Scope the license check to the MR's real changed files (GitLab's
+            // authoritative source-vs-target list). Without this, on a CI
+            // merge-ref checkout the local git diff also sees pom.xml/etc.
+            // changes from other MRs already merged into the target branch,
+            // producing license findings for files this MR never touched.
+            let restrictToPaths: string[] | undefined;
+            if (!localMode && platform === "gitlab") {
+              const mrFiles = await getGitlabMrChangedFiles(owner, repo, prNumber, host);
+              if (mrFiles) restrictToPaths = mrFiles;
+            }
             const licenseFindings = await buildLicenseFindings({
               workspacePath,
               baseRef: licenseCheckBaseRef,
               useWorkingTree: localMode,
+              restrictToPaths,
             });
             if (licenseFindings.length > 0) {
               logger.info(`License check: ${licenseFindings.length} finding(s)`);
