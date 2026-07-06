@@ -1237,16 +1237,32 @@ export async function reviewPr(opts: {
         });
         activeSession = session;
 
-        // Inject Bedrock cost allocation tags into stream requests
-        if (bedrockTags && parsed.provider === "amazon-bedrock") {
-          type AgentWithStream = { agent: { streamFn: (...args: unknown[]) => unknown } };
+        // Pin sampling temperature to 0 (env-overridable) so reviews are
+        // deterministic and consistent run-to-run. Without this the provider's
+        // default sampling (~1.0 for many models) makes each run explore
+        // differently and surface a different subset of findings. Skipped for
+        // models that don't support a temperature param (some reasoning models
+        // reject it). Also injects Bedrock cost tags when applicable — one hook.
+        const tempEnv = process.env.HODOR_TEMPERATURE;
+        const temperature = tempEnv !== undefined && tempEnv.trim() !== "" ? Number(tempEnv) : 0;
+        const modelSupportsTemp =
+          (piModel as { supportsTemperature?: boolean }).supportsTemperature !== false &&
+          Number.isFinite(temperature);
+        const needsBedrockTags = Boolean(bedrockTags) && parsed.provider === "amazon-bedrock";
+        if (modelSupportsTemp || needsBedrockTags) {
+          type AgentWithStream = { agent?: { streamFn?: (...args: unknown[]) => unknown } };
           const agent = (session as unknown as AgentWithStream).agent;
-          const originalStreamFn = agent.streamFn;
-          agent.streamFn = (...args: unknown[]) => {
-            const options = (args[2] ?? {}) as Record<string, unknown>;
-            return originalStreamFn(args[0], args[1], { ...options, requestMetadata: bedrockTags });
-          };
-          logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
+          if (agent && typeof agent.streamFn === "function") {
+            const originalStreamFn = agent.streamFn.bind(agent);
+            agent.streamFn = (...args: unknown[]) => {
+              const options = { ...((args[2] ?? {}) as Record<string, unknown>) };
+              if (modelSupportsTemp && options.temperature === undefined) options.temperature = temperature;
+              if (needsBedrockTags) options.requestMetadata = bedrockTags;
+              return originalStreamFn(args[0], args[1], options);
+            };
+            if (modelSupportsTemp) logger.info(`Sampling temperature pinned to ${temperature} for deterministic review`);
+            if (needsBedrockTags) logger.info(`Bedrock cost allocation tags: ${JSON.stringify(bedrockTags)}`);
+          }
         }
 
         // Subscribe to agent events for progress + metrics tracking
