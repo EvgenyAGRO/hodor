@@ -642,7 +642,53 @@ export function filterEmbeddedDiff(rawDiff: string): { filtered: string; skipped
   return { filtered: kept.join(""), skippedFiles };
 }
 
+/**
+ * Build the `git` argv for the diff we embed in the prompt.
+ *
+ * `restrictPaths` scopes the diff to an explicit pathspec (via `--`). We pass
+ * the MR's authoritative changed-file list here so a stale CI diff base can't
+ * pull in unrelated, already-merged changes — see the call site for the full
+ * rationale. An empty/omitted list leaves the diff unscoped (the old behaviour).
+ */
+export function buildEmbeddedDiffArgs(opts: {
+  previousReviewSha: string | null;
+  diffBaseSha: string | null;
+  localMode: boolean;
+  targetBranch: string;
+  restrictPaths?: string[] | null;
+}): string[] {
+  const { previousReviewSha, diffBaseSha, localMode, targetBranch, restrictPaths } = opts;
+  const args = previousReviewSha
+    ? ["--no-pager", "diff", `${previousReviewSha}...HEAD`]
+    : diffBaseSha
+      ? ["--no-pager", "diff", diffBaseSha, "HEAD"]
+      : localMode
+        ? ["--no-pager", "diff", targetBranch] // includes uncommitted changes
+        : ["--no-pager", "diff", `origin/${targetBranch}...HEAD`];
+  if (restrictPaths && restrictPaths.length > 0) {
+    args.push("--", ...restrictPaths);
+  }
+  return args;
+}
+
 const SUBMIT_REVIEW_RECOVERY_ATTEMPTS = 2;
+
+// Hard ceiling on agent turns per review. A healthy review submits in well under
+// this; the cap is a backstop against runaway exploration (e.g. an oversized
+// diff sending the agent read/grep-ing the whole repo), not the primary cost
+// lever — scoping the diff to the MR's changed files is. Override with
+// HODOR_MAX_TURNS. When the cap trips we abort the run and let the submit_review
+// recovery flow capture whatever the agent already has, granted a few extra turns.
+const DEFAULT_MAX_AGENT_TURNS = 25;
+const RECOVERY_TURN_GRACE = 3;
+
+/** Resolve the agent turn cap from HODOR_MAX_TURNS, falling back to the default. */
+export function resolveMaxAgentTurns(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_AGENT_TURNS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_MAX_AGENT_TURNS;
+  return Math.floor(parsed);
+}
 
 /** Raised when the agent exhausts all in-session submit_review recovery attempts with no content. */
 export class StuckPatternError extends Error {
@@ -1051,17 +1097,38 @@ export async function reviewPr(opts: {
     const licenseCheckBaseRef =
       previousReviewSha ?? diffBaseSha ?? (localMode ? targetBranch : `origin/${targetBranch}`);
 
+    // GitLab's authoritative source-vs-target changed-file list. The CI diff base
+    // (CI_MERGE_REQUEST_DIFF_BASE_SHA) goes stale when the source branch merges
+    // the target back in: a raw `git diff <base> HEAD` then also surfaces every
+    // other already-merged change, so the agent reviews — and bills for — files
+    // this MR never touched. Scoping the diff to these paths keeps it aligned with
+    // what GitLab shows under "Changes". Fetched once and reused for the license
+    // check below. `null` (fetch failed / other platform) leaves the diff unscoped.
+    let mrChangedFiles: string[] | null = null;
+    if (!localMode && platform === "gitlab") {
+      try {
+        mrChangedFiles = await getGitlabMrChangedFiles(owner, repo, prNumber, host);
+      } catch (err) {
+        logger.warn(`Failed to fetch MR changed files for diff scoping: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    const diffRestrictPaths =
+      mrChangedFiles && mrChangedFiles.length > 0 ? mrChangedFiles : null;
+
     // Pre-fetch diff for embedding in prompt (avoids per-file tool calls)
     const MAX_EMBED_BYTES = 200 * 1024; // 200KB
     let embeddedDiff: string | null = null;
     try {
-      const diffArgs = previousReviewSha
-        ? ["--no-pager", "diff", `${previousReviewSha}...HEAD`]
-        : diffBaseSha
-          ? ["--no-pager", "diff", diffBaseSha, "HEAD"]
-          : localMode
-            ? ["--no-pager", "diff", targetBranch]  // includes uncommitted changes
-            : ["--no-pager", "diff", `origin/${targetBranch}...HEAD`];
+      const diffArgs = buildEmbeddedDiffArgs({
+        previousReviewSha,
+        diffBaseSha,
+        localMode,
+        targetBranch,
+        restrictPaths: diffRestrictPaths,
+      });
+      if (diffRestrictPaths) {
+        logger.info(`Scoping embedded diff to ${diffRestrictPaths.length} MR-changed file(s) (GitLab authoritative list)`);
+      }
       const { stdout: rawDiff } = await exec("git", diffArgs, { cwd: workspacePath });
       const { filtered: filteredDiff, skippedFiles } = filterEmbeddedDiff(rawDiff);
       if (skippedFiles.length > 0) {
@@ -1269,6 +1336,15 @@ export async function reviewPr(opts: {
         let turnCount = 0;
         let toolCallCount = 0;
 
+        // Turn-cap state. `turnCap` is bumped with a small grace during recovery
+        // so the abort below can't starve the submit_review recovery prompt.
+        // `abortArmed` guards against firing abort() repeatedly for one run; it is
+        // re-armed before each recovery prompt.
+        const maxAgentTurns = resolveMaxAgentTurns(process.env.HODOR_MAX_TURNS);
+        let turnCap = maxAgentTurns;
+        let turnLimitReached = false;
+        let abortArmed = true;
+
         session.subscribe((event) => {
           switch (event.type) {
             case "agent_start":
@@ -1279,6 +1355,19 @@ export async function reviewPr(opts: {
               break;
             case "turn_start":
               turnCount++;
+              if (abortArmed && turnCount > turnCap) {
+                abortArmed = false;
+                turnLimitReached = true;
+                logger.warn(
+                  `Agent reached turn cap (${turnCap} turns); aborting exploration to force review submission. ` +
+                    `Increase HODOR_MAX_TURNS if legitimate reviews need more.`,
+                );
+                // Fire-and-forget: abort() resolves the in-flight prompt() so the
+                // recovery flow can request a submit_review from existing context.
+                void session.abort().catch((err) => {
+                  logger.warn(`Turn-cap abort failed: ${err instanceof Error ? err.message : err}`);
+                });
+              }
               onEvent?.({ type: "turn_start", turnIndex: turnCount });
               break;
             case "turn_end":
@@ -1322,6 +1411,9 @@ export async function reviewPr(opts: {
 
         const throwIfAgentErrored = (): void => {
           // pi-agent-core stores failed/aborted assistant turns in state.errorMessage.
+          // A turn-cap abort deliberately lands here too, so skip the check once the
+          // cap has tripped — that abort is expected, not an LLM failure.
+          if (turnLimitReached) return;
           const agentError = session.state.errorMessage;
           if (agentError) {
             throw new Error(`LLM request failed: ${agentError}`);
@@ -1356,6 +1448,13 @@ export async function reviewPr(opts: {
           !submittedReview && recoveryAttempt <= SUBMIT_REVIEW_RECOVERY_ATTEMPTS;
           recoveryAttempt++
         ) {
+          // If we aborted on the turn cap, grant the recovery prompt a small,
+          // bounded budget (and re-arm the abort) so it can actually submit
+          // instead of being cut off on its first turn.
+          if (turnLimitReached) {
+            turnCap = turnCount + RECOVERY_TURN_GRACE;
+            abortArmed = true;
+          }
           logger.warn(
             `Agent ended without a valid submit_review (${summarizeLastAssistantMessage(session)}); ` +
             `requesting recovery ${recoveryAttempt}/${SUBMIT_REVIEW_RECOVERY_ATTEMPTS}`,
@@ -1404,11 +1503,8 @@ export async function reviewPr(opts: {
             // merge-ref checkout the local git diff also sees pom.xml/etc.
             // changes from other MRs already merged into the target branch,
             // producing license findings for files this MR never touched.
-            let restrictToPaths: string[] | undefined;
-            if (!localMode && platform === "gitlab") {
-              const mrFiles = await getGitlabMrChangedFiles(owner, repo, prNumber, host);
-              if (mrFiles) restrictToPaths = mrFiles;
-            }
+            // Reuses the list already fetched above for diff scoping.
+            const restrictToPaths: string[] | undefined = diffRestrictPaths ?? undefined;
             const licenseFindings = await buildLicenseFindings({
               workspacePath,
               baseRef: licenseCheckBaseRef,

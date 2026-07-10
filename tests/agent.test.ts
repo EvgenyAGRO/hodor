@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  buildEmbeddedDiffArgs,
   buildSubmitReviewRecoveryPrompt,
   detectPlatform,
   filterEmbeddedDiff,
   getHodorReviewShaCandidates,
   parseReviewFromAssistantText,
   parsePrUrl,
+  resolveMaxAgentTurns,
 } from "../src/agent.js";
 import { formatMetricsMarkdown } from "../src/metrics.js";
 import type { ReviewMetrics } from "../src/types.js";
@@ -411,5 +413,122 @@ describe("filterEmbeddedDiff", () => {
     const { filtered, skippedFiles } = filterEmbeddedDiff(raw);
     expect(skippedFiles).toHaveLength(2);
     expect(filtered).toBe("");
+  });
+});
+
+describe("buildEmbeddedDiffArgs", () => {
+  it("uses previousReviewSha (incremental) when present, ignoring the base sha", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: "deadbeef",
+      diffBaseSha: "1e8a628d",
+      localMode: false,
+      targetBranch: "develop",
+    });
+    expect(args).toEqual(["--no-pager", "diff", "deadbeef...HEAD"]);
+  });
+
+  it("uses the CI diff base sha as a two-dot diff when no previous review", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: null,
+      diffBaseSha: "1e8a628d",
+      localMode: false,
+      targetBranch: "develop",
+    });
+    expect(args).toEqual(["--no-pager", "diff", "1e8a628d", "HEAD"]);
+  });
+
+  it("diffs against the working tree in local mode when no base is known", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: null,
+      diffBaseSha: null,
+      localMode: true,
+      targetBranch: "origin/main",
+    });
+    expect(args).toEqual(["--no-pager", "diff", "origin/main"]);
+  });
+
+  it("falls back to origin/<target>...HEAD for a remote review with no base", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: null,
+      diffBaseSha: null,
+      localMode: false,
+      targetBranch: "develop",
+    });
+    expect(args).toEqual(["--no-pager", "diff", "origin/develop...HEAD"]);
+  });
+
+  it("appends a `--` pathspec when restrictPaths is provided", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: null,
+      diffBaseSha: "1e8a628d",
+      localMode: false,
+      targetBranch: "develop",
+      restrictPaths: ["Products/SMB/Projects/full/pom.xml"],
+    });
+    expect(args).toEqual([
+      "--no-pager",
+      "diff",
+      "1e8a628d",
+      "HEAD",
+      "--",
+      "Products/SMB/Projects/full/pom.xml",
+    ]);
+  });
+
+  it("does not append a pathspec for an empty or missing restrictPaths", () => {
+    const base = ["--no-pager", "diff", "1e8a628d", "HEAD"];
+    expect(
+      buildEmbeddedDiffArgs({
+        previousReviewSha: null,
+        diffBaseSha: "1e8a628d",
+        localMode: false,
+        targetBranch: "develop",
+        restrictPaths: [],
+      }),
+    ).toEqual(base);
+    expect(
+      buildEmbeddedDiffArgs({
+        previousReviewSha: null,
+        diffBaseSha: "1e8a628d",
+        localMode: false,
+        targetBranch: "develop",
+        restrictPaths: null,
+      }),
+    ).toEqual(base);
+  });
+
+  it("scopes even the incremental diff so a stale base can't leak extra files", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: "deadbeef",
+      diffBaseSha: null,
+      localMode: false,
+      targetBranch: "develop",
+      restrictPaths: ["a.ts", "b.ts"],
+    });
+    expect(args).toEqual(["--no-pager", "diff", "deadbeef...HEAD", "--", "a.ts", "b.ts"]);
+  });
+});
+
+describe("resolveMaxAgentTurns", () => {
+  it("defaults to 25 when unset or blank", () => {
+    expect(resolveMaxAgentTurns(undefined)).toBe(25);
+    expect(resolveMaxAgentTurns("")).toBe(25);
+    expect(resolveMaxAgentTurns("   ")).toBe(25);
+  });
+
+  it("honors a valid HODOR_MAX_TURNS override", () => {
+    expect(resolveMaxAgentTurns("10")).toBe(10);
+    expect(resolveMaxAgentTurns("1")).toBe(1);
+  });
+
+  it("floors fractional values", () => {
+    expect(resolveMaxAgentTurns("12.9")).toBe(12);
+  });
+
+  it("falls back to the default for invalid or out-of-range values", () => {
+    expect(resolveMaxAgentTurns("0")).toBe(25);
+    expect(resolveMaxAgentTurns("-5")).toBe(25);
+    expect(resolveMaxAgentTurns("abc")).toBe(25);
+    expect(resolveMaxAgentTurns("NaN")).toBe(25);
   });
 });
