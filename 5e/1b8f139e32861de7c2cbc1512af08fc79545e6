@@ -1,0 +1,47 @@
+tests/gitlab-unified-diff.test.ts
+  s_48842b01e94e5e::t_e95d346ca73e62 45
+  s_48842b01e94e5e::t_bc470607aa795b 128
+src/license-checker.ts
+  s_48842b01e94e5e::t_0730a377b86178 724-778,785-788,790,801-809
+  s_3eb4642a161e2d::t_8dda8d4b75e13d 810
+src/prompt.ts
+  s_48842b01e94e5e::t_1c34831573198b 145-160,166-168
+  s_48842b01e94e5e::t_e7dda74e087021 27-28,44
+  s_48842b01e94e5e::t_6ee10a97b3a446 281-283,289
+  s_48842b01e94e5e::t_1348874f0c320d 195-211
+tests/license-checker.test.ts
+  s_48842b01e94e5e::t_c1aab289655fd9 735-835
+tests/prompt.test.ts
+  s_48842b01e94e5e::t_1f56f870c2fc22 156-203
+src/agent.ts
+  s_48842b01e94e5e::t_0f2a45fd401ef3 1556-1558
+  s_48842b01e94e5e::t_2b07b648b0a483 1207
+  s_48842b01e94e5e::t_50056533116329 1113-1114,1120-1123
+src/gitlab.ts
+  s_48842b01e94e5e::t_5dcb9ef3e10b19 547,562,567-568
+  s_48842b01e94e5e::t_3b0b54c9d4d725 496-498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "5e1b8f139e32861de7c2cbc1512af08fc79545e6",
+  "prompts": {},
+  "sessions": {
+    "s_3eb4642a161e2d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f48a1-85c6-7152-97a0-86fad4ab724c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    },
+    "s_48842b01e94e5e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3388a2c8-7260-472f-a1bb-b9e074568383",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
