@@ -24,6 +24,8 @@ export function buildPrReviewPrompt(opts: {
   /** When true, the local `git diff` is unreliable (stale CI base) — we sourced
    *  the diff authoritatively, so the prompt must not advertise git-diff commands. */
   suppressGitCommands?: boolean;
+  /** Files GitLab omitted from the diff (too large); the agent is told to read them. */
+  tooLargeFiles?: string[] | null;
   previousReviewSha?: string | null;
   localMode?: boolean;
   jiraContext?: string | null;
@@ -39,6 +41,7 @@ export function buildPrReviewPrompt(opts: {
     embeddedDiff,
     authoritativeDiffPath,
     suppressGitCommands = false,
+    tooLargeFiles,
     previousReviewSha,
     localMode = false,
     jiraContext,
@@ -139,13 +142,30 @@ export function buildPrReviewPrompt(opts: {
       "5. If the delta does not introduce a production bug, submit no findings.\n\n";
   }
 
-  // Step 3c: Build conditional sections based on whether diff is embedded
+  // Files GitLab couldn't include in the diff (too large). Their hunks are
+  // absent, so the diff above/on-disk is NOT complete for them — the agent must
+  // open them directly or it silently reviews nothing for those paths.
+  const cleanTooLargeFiles = (tooLargeFiles ?? []).filter(Boolean);
+  const tooLargeNote =
+    cleanTooLargeFiles.length > 0
+      ? "\n## Files Omitted From the Diff (Too Large)\n\n" +
+        "GitLab did not include the diff content for the following changed file(s); " +
+        "their changes are **not** shown in the diff above:\n" +
+        cleanTooLargeFiles.map((f) => `- \`${f}\``).join("\n") +
+        "\n\nInspect each one with `read` before finalizing — do not assume they are unchanged.\n"
+      : "";
+
+  // Step 3c: Build conditional sections based on whether diff is embedded.
+  // Note: an empty string means "diff fetched, but nothing reviewable after
+  // filtering docs/lockfiles" — distinct from null ("no diff, use commands").
   let embeddedDiffSection: string;
   let diffFetchInstructions: string;
   let reviewProcessSection: string;
   let startInstruction: string;
 
-  if (embeddedDiff) {
+  const hasEmbeddedContent = embeddedDiff != null && embeddedDiff.trim() !== "";
+
+  if (hasEmbeddedContent) {
     embeddedDiffSection =
       "## Full Diff (Pre-fetched)\n\n" +
       "The complete diff for this PR is provided below. Analyze it directly. " +
@@ -172,6 +192,23 @@ export function buildPrReviewPrompt(opts: {
     startInstruction = previousReviewSha
       ? "Analyze only the incremental diff provided above. If it is self-contained, submit your review without extra tool calls."
       : "Analyze the diff provided above, then submit your review using `submit_review`.";
+  } else if (embeddedDiff != null) {
+    // Diff was fetched but is empty after filtering (only docs/lockfiles, or no
+    // changes). Do NOT drop into command mode — that would run a stale git diff.
+    // If some files were merely too large to include, the note below carries them.
+    const hasOmitted = cleanTooLargeFiles.length > 0;
+    embeddedDiffSection = hasOmitted
+      ? "## Diff\n\nEvery in-diff change was filtered out (docs/lockfiles), but some files were too large for GitLab to include — see below.\n"
+      : "## Diff\n\nNo reviewable code changes were detected (the changes were limited to files Hodor filters out, such as docs or lockfiles, or the diff was empty).\n";
+    diffFetchInstructions = hasOmitted
+      ? "## Review the Omitted Files\n\nThe only changes needing review are the too-large files listed below. Inspect them with `read`.\n"
+      : "## No Reviewable Changes\n\nThere are no code changes to review. Do NOT run `git diff`.\n";
+    reviewProcessSection = hasOmitted
+      ? "## Review Process\n\n1. `read` each omitted file listed below\n2. Submit your review using `submit_review`\n"
+      : "## Review Process\n\n1. Confirm there are no reviewable code changes\n2. Submit an empty review with `submit_review`\n";
+    startInstruction = hasOmitted
+      ? "Inspect the too-large files listed below with `read`, then submit your review using `submit_review`."
+      : "There are no reviewable code changes. Call `submit_review` with an empty `findings` array and `overall_correctness: \"patch is correct\"`.";
   } else if (authoritativeDiffPath) {
     // Diff too large to inline, but we saved the authoritative patch to disk.
     // Point the agent at that file — NOT `git diff`, whose CI base can include
@@ -241,12 +278,15 @@ export function buildPrReviewPrompt(opts: {
       `Start by running \`${prDiffCmd}\` to list the changed files, then analyze each file individually using \`${gitDiffCmd} -- path/to/file\`.`;
   }
 
+  // Surface too-large omitted files in whichever diff section we built.
+  embeddedDiffSection += tooLargeNote;
+
   // "Available commands" list. When the local git diff is unreliable (GitLab's
   // stale CI base), do not advertise git-diff commands — steer to the embedded
   // diff / saved file instead, so the agent can't reintroduce the leak.
   let diffCommandSection: string;
   if (suppressGitCommands) {
-    const where = embeddedDiff
+    const where = hasEmbeddedContent
       ? "in the diff above"
       : authoritativeDiffPath
         ? `in the file \`${authoritativeDiffPath}\``

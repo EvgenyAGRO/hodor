@@ -42,7 +42,7 @@ describe("getGitlabMrUnifiedDiff", () => {
     const result = await getGitlabMrUnifiedDiff("owner", "repo", 7, "gitlab.com");
     expect(result).not.toBeNull();
     expect(result?.files).toEqual(["src/app.ts"]);
-    expect(result?.hasTooLargeFiles).toBe(false);
+    expect(result?.tooLargeFiles).toEqual([]);
     expect(result?.diff).toBe(
       [
         "diff --git a/src/app.ts b/src/app.ts",
@@ -125,7 +125,7 @@ describe("getGitlabMrUnifiedDiff", () => {
     ]);
 
     const result = await getGitlabMrUnifiedDiff("owner", "repo", 7);
-    expect(result?.hasTooLargeFiles).toBe(true);
+    expect(result?.tooLargeFiles).toEqual(["big.bin"]);
     // Header still present even with no hunk body.
     expect(result?.diff).toContain("diff --git a/big.bin b/big.bin");
   });

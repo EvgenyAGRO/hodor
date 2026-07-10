@@ -1110,13 +1110,17 @@ export async function reviewPr(opts: {
     // reused for the license check below. See getGitlabMrUnifiedDiff.
     let mrChangedFiles: string[] | null = null;
     let gitlabAuthoritativeDiff: string | null = null;
+    let gitlabMrDiffText: string | null = null;
+    let tooLargeFiles: string[] = [];
     if (!localMode && platform === "gitlab") {
       try {
         const mrDiff = await getGitlabMrUnifiedDiff(owner, repo, prNumber, host);
         if (mrDiff) {
           mrChangedFiles = mrDiff.files;
-          if (mrDiff.hasTooLargeFiles) {
-            logger.warn("GitLab omitted content for one or more too-large files; the agent may need to read them directly");
+          gitlabMrDiffText = mrDiff.diff;
+          tooLargeFiles = mrDiff.tooLargeFiles;
+          if (tooLargeFiles.length > 0) {
+            logger.warn(`GitLab omitted content for ${tooLargeFiles.length} too-large file(s); the agent is told to inspect them directly`);
           }
           // Incremental reviews already diff `previousReviewSha...HEAD` (a
           // correct three-dot range that excludes upstream changes); only full
@@ -1200,6 +1204,7 @@ export async function reviewPr(opts: {
       // The local git diff is unreliable when we sourced GitLab's authoritative
       // diff (stale CI base); don't let the prompt advertise git-diff commands.
       suppressGitCommands: gitlabAuthoritativeDiff !== null,
+      tooLargeFiles,
       previousReviewSha,
       localMode,
       jiraContext,
@@ -1548,6 +1553,9 @@ export async function reviewPr(opts: {
               baseRef: licenseCheckBaseRef,
               useWorkingTree: localMode,
               restrictToPaths,
+              // GitLab's authoritative diff (when available) grounds the check so
+              // a manifest the target also changed can't leak target-only deps.
+              authoritativeDiff: gitlabMrDiffText,
             });
             if (licenseFindings.length > 0) {
               logger.info(`License check: ${licenseFindings.length} finding(s)`);

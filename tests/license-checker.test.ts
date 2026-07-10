@@ -732,3 +732,104 @@ describe("buildLicenseFindings", () => {
     }
   });
 });
+
+describe("filterChangesToAuthoritativeDiff", () => {
+  const mavenChange = (name: string, version: string | null, manifestPath = "pom.xml") =>
+    ({ ecosystem: "maven" as const, name, version, manifestPath });
+
+  it("keeps a dependency whose artifactId appears on an added line", () => {
+    const diff = [
+      "diff --git a/pom.xml b/pom.xml",
+      "--- a/pom.xml",
+      "+++ b/pom.xml",
+      "@@ -1,3 +1,6 @@",
+      "         <dependency>",
+      "+            <groupId>com.source</groupId>",
+      "+            <artifactId>source-lib</artifactId>",
+      "+            <version>1.0.0</version>",
+      "         </dependency>",
+    ].join("\n");
+    const changes = [mavenChange("com.source:source-lib", "1.0.0")];
+    expect(mod.filterChangesToAuthoritativeDiff(changes, diff)).toEqual(changes);
+  });
+
+  it("drops a target-only dependency that never appears on an added line", () => {
+    // The MR only added `source-lib`; `target-lib` was added by the target
+    // branch and merged in, so the stale-base scan surfaced it too.
+    const diff = [
+      "diff --git a/pom.xml b/pom.xml",
+      "--- a/pom.xml",
+      "+++ b/pom.xml",
+      "@@ -1,3 +1,4 @@",
+      "         <dependency>",
+      "+            <artifactId>source-lib</artifactId>",
+      "         </dependency>",
+    ].join("\n");
+    const changes = [
+      mavenChange("com.source:source-lib", "1.0.0"),
+      mavenChange("com.target:target-lib", "2.0.0"),
+    ];
+    const kept = mod.filterChangesToAuthoritativeDiff(changes, diff);
+    expect(kept.map((c) => c.name)).toEqual(["com.source:source-lib"]);
+  });
+
+  it("keeps a version bump by matching the new version on an added line", () => {
+    const diff = [
+      "diff --git a/pom.xml b/pom.xml",
+      "--- a/pom.xml",
+      "+++ b/pom.xml",
+      "@@ -10,3 +10,3 @@",
+      "             <artifactId>bumped-lib</artifactId>",
+      "-            <version>1.0.0</version>",
+      "+            <version>2.0.0</version>",
+    ].join("\n");
+    const changes = [mavenChange("com.x:bumped-lib", "2.0.0")];
+    expect(mod.filterChangesToAuthoritativeDiff(changes, diff)).toEqual(changes);
+  });
+
+  it("drops all changes for a manifest absent from the authoritative diff", () => {
+    const diff = [
+      "diff --git a/other/pom.xml b/other/pom.xml",
+      "--- a/other/pom.xml",
+      "+++ b/other/pom.xml",
+      "@@ -1 +1,2 @@",
+      "+            <artifactId>x</artifactId>",
+    ].join("\n");
+    const changes = [mavenChange("com.x:only-here", "1.0.0", "pom.xml")];
+    expect(mod.filterChangesToAuthoritativeDiff(changes, diff)).toEqual([]);
+  });
+});
+
+describe("addedLinesByFile", () => {
+  it("collects added lines per new-file path and ignores headers/removals", () => {
+    const diff = [
+      "diff --git a/a.txt b/a.txt",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -1,2 +1,2 @@",
+      "-old",
+      "+new-a",
+      " ctx",
+      "diff --git a/b.txt b/b.txt",
+      "--- a/b.txt",
+      "+++ b/b.txt",
+      "@@ -0,0 +1 @@",
+      "+new-b",
+    ].join("\n");
+    const map = mod.addedLinesByFile(diff);
+    expect(map.get("a.txt")).toEqual(["new-a"]);
+    expect(map.get("b.txt")).toEqual(["new-b"]);
+  });
+
+  it("attributes nothing to a deleted file (+++ /dev/null)", () => {
+    const diff = [
+      "diff --git a/gone.txt b/gone.txt",
+      "--- a/gone.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-bye",
+    ].join("\n");
+    const map = mod.addedLinesByFile(diff);
+    expect(map.size).toBe(0);
+  });
+});

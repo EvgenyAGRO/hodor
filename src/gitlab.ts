@@ -493,8 +493,9 @@ export interface GitlabMrDiff {
   diff: string;
   /** Union of old_path/new_path across every changed file. */
   files: string[];
-  /** True if GitLab omitted at least one file's content (flagged `too_large`). */
-  hasTooLargeFiles: boolean;
+  /** Paths GitLab flagged `too_large` — their hunks are omitted from `diff`, so
+   *  the agent must inspect them directly. */
+  tooLargeFiles: string[];
 }
 
 /** Rebuild one file's `diff --git` section from a GitLab `/diffs` entry. */
@@ -543,8 +544,8 @@ export async function getGitlabMrUnifiedDiff(
   const encoded = encodedProjectPath(owner, repo);
   const env = glabEnv(host);
   const files = new Set<string>();
+  const tooLargeFiles = new Set<string>();
   const sections: string[] = [];
-  let hasTooLargeFiles = false;
   try {
     for (let page = 1; page <= 20; page++) {
       const changes = await execJson<Array<Record<string, unknown>>>(
@@ -558,12 +559,13 @@ export async function getGitlabMrUnifiedDiff(
         const newPath = typeof change.new_path === "string" ? change.new_path : undefined;
         if (oldPath) files.add(oldPath);
         if (newPath) files.add(newPath);
-        if (change.too_large === true) hasTooLargeFiles = true;
+        if (change.too_large === true) tooLargeFiles.add(newPath ?? oldPath ?? "");
         sections.push(reconstructGitDiffSection(change, oldPath, newPath));
       }
       if (changes.length < 50) break;
     }
-    return { diff: sections.join(""), files: [...files], hasTooLargeFiles };
+    tooLargeFiles.delete("");
+    return { diff: sections.join(""), files: [...files], tooLargeFiles: [...tooLargeFiles] };
   } catch (err) {
     logger.warn(`Failed to fetch MR unified diff: ${err instanceof Error ? err.message : err}`);
     return null;

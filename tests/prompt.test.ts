@@ -153,4 +153,52 @@ describe("buildPrReviewPrompt", () => {
     expect(prompt).toContain("Do NOT run `git diff`");
     expect(prompt).not.toContain(staleCmd);
   });
+
+  it("treats an empty embedded diff as 'no reviewable changes', not command mode", () => {
+    const staleCmd = "git --no-pager diff 1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d HEAD";
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+      embeddedDiff: "",
+      suppressGitCommands: true,
+    });
+
+    expect(prompt).toContain("No reviewable code changes");
+    // Must NOT fall through to the stale command mode.
+    expect(prompt).not.toContain(staleCmd);
+  });
+
+  it("lists too-large omitted files and tells the agent to read them", () => {
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      embeddedDiff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n",
+      suppressGitCommands: true,
+      tooLargeFiles: ["big/Generated.java"],
+    });
+
+    expect(prompt).toContain("Files Omitted From the Diff (Too Large)");
+    expect(prompt).toContain("big/Generated.java");
+    expect(prompt).toContain("Inspect each one with `read`");
+  });
+
+  it("points to too-large files even when the rest of the diff is empty", () => {
+    const staleCmd = "git --no-pager diff 1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d HEAD";
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+      embeddedDiff: "",
+      suppressGitCommands: true,
+      tooLargeFiles: ["big/Generated.java"],
+    });
+
+    expect(prompt).toContain("big/Generated.java");
+    expect(prompt).not.toContain("No reviewable code changes");
+    expect(prompt).not.toContain(staleCmd);
+  });
 });
