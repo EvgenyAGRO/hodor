@@ -1,0 +1,22 @@
+src/prompt.ts
+  s_48842b01e94e5e::t_a48a53b7ad5d3a 102-107
+tests/prompt.test.ts
+  s_48842b01e94e5e::t_29ca1241d85dbe 1,7
+  s_48842b01e94e5e::t_c9cfbed077cddb 205-240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "182d260381659d45e0d264dfea69987d0958657b",
+  "prompts": {},
+  "sessions": {
+    "s_48842b01e94e5e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3388a2c8-7260-472f-a1bb-b9e074568383",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
