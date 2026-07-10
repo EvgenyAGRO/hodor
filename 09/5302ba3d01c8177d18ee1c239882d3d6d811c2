@@ -1,0 +1,41 @@
+tests/agent-recovery.test.ts
+  s_48842b01e94e5e::t_fd0e5db7b646b2 381-506
+.env.example
+  s_48842b01e94e5e::t_d1d334dc3de7ee 28-31
+src/agent.ts
+  s_48842b01e94e5e::t_9c23d3106f1047 645-673,676-691
+  s_48842b01e94e5e::t_930bd5e1182e25 1100-1117,1122-1131
+  s_48842b01e94e5e::t_04332e814d2a61 1339-1347
+  s_48842b01e94e5e::t_89606e0b852b2b 1414-1416
+  s_48842b01e94e5e::t_72e9675405012a 1451-1457
+  s_48842b01e94e5e::t_6998ebd3f1d5ee 1506-1507
+  s_48842b01e94e5e::t_f325189ab1e5b4 1358-1370
+  s_ea8eadd9e8fe0d::t_499f5bda9cc709 692
+tests/agent.test.ts
+  s_48842b01e94e5e::t_e500c3943adee0 3,10
+  s_48842b01e94e5e::t_c7c88f28032e27 418-534
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "095302ba3d01c8177d18ee1c239882d3d6d811c2",
+  "prompts": {},
+  "sessions": {
+    "s_48842b01e94e5e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3388a2c8-7260-472f-a1bb-b9e074568383",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    },
+    "s_ea8eadd9e8fe0d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "06949aa9-c435-4c70-9479-5fe661c8bab5",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "evgenyagronsky <evgeny.a@coro.net>"
+    }
+  }
+}
