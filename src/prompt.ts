@@ -99,7 +99,12 @@ export function buildPrReviewPrompt(opts: {
     if (diffBaseSha) {
       prDiffCmd = `git --no-pager diff ${diffBaseSha} HEAD --name-only`;
       gitDiffCmd = `git --no-pager diff ${diffBaseSha} HEAD`;
-      logger.info(`Using GitLab CI_MERGE_REQUEST_DIFF_BASE_SHA: ${diffBaseSha.slice(0, 8)}`);
+      // Only relevant when these git commands are actually used (command mode).
+      // When the authoritative GitLab diff is embedded, suppressGitCommands is
+      // set and this base SHA is never used — logging it would be misleading.
+      if (!suppressGitCommands) {
+        logger.info(`Using GitLab CI_MERGE_REQUEST_DIFF_BASE_SHA: ${diffBaseSha.slice(0, 8)}`);
+      }
     } else {
       prDiffCmd = `git --no-pager diff origin/${targetBranch}...HEAD --name-only`;
       gitDiffCmd = `git --no-pager diff origin/${targetBranch}...HEAD`;

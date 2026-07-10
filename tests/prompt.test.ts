@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildMrSections,
   buildPrReviewPrompt,
   normalizeLabelNames,
 } from "../src/prompt.js";
+import { logger } from "../src/utils/logger.js";
 
 describe("buildMrSections", () => {
   it("handles string labels", () => {
@@ -200,5 +201,41 @@ describe("buildPrReviewPrompt", () => {
     expect(prompt).toContain("big/Generated.java");
     expect(prompt).not.toContain("No reviewable code changes");
     expect(prompt).not.toContain(staleCmd);
+  });
+
+  it("does NOT log the CI diff-base SHA when the authoritative diff is used", () => {
+    const spy = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      buildPrReviewPrompt({
+        prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+        platform: "gitlab",
+        targetBranch: "develop",
+        diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+        embeddedDiff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n",
+        suppressGitCommands: true,
+      });
+      const logged = spy.mock.calls.flat().join("\n");
+      expect(logged).not.toContain("CI_MERGE_REQUEST_DIFF_BASE_SHA");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("still logs the CI diff-base SHA in command mode (where it is used)", () => {
+    const spy = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      buildPrReviewPrompt({
+        prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+        platform: "gitlab",
+        targetBranch: "develop",
+        diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+        embeddedDiff: null,
+        suppressGitCommands: false,
+      });
+      const logged = spy.mock.calls.flat().join("\n");
+      expect(logged).toContain("CI_MERGE_REQUEST_DIFF_BASE_SHA");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
