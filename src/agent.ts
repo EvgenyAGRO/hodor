@@ -14,7 +14,7 @@ import {
   postGitlabMrComment,
   getGitlabMrDiffRefs,
   getGitlabMrDiffLineMap,
-  getGitlabMrChangedFiles,
+  getGitlabMrUnifiedDiff,
   createGitlabDraftNote,
   publishGitlabDraftNotesResilient,
   postGitlabCommitStatus,
@@ -995,6 +995,9 @@ export async function reviewPr(opts: {
   let targetBranch: string;
   let diffBaseSha: string | null = null;
   let isTemporary = false;
+  // Path to the authoritative MR diff written to disk when it's too large to
+  // embed inline (see below). Cleaned up in the finally block.
+  let authoritativeDiffPath: string | null = null;
 
   if (localMode) {
     // Resolve to git repo root so paths from git diff match tool expectations
@@ -1097,19 +1100,31 @@ export async function reviewPr(opts: {
     const licenseCheckBaseRef =
       previousReviewSha ?? diffBaseSha ?? (localMode ? targetBranch : `origin/${targetBranch}`);
 
-    // GitLab's authoritative source-vs-target changed-file list. The CI diff base
-    // (CI_MERGE_REQUEST_DIFF_BASE_SHA) goes stale when the source branch merges
-    // the target back in: a raw `git diff <base> HEAD` then also surfaces every
-    // other already-merged change, so the agent reviews — and bills for — files
-    // this MR never touched. Scoping the diff to these paths keeps it aligned with
-    // what GitLab shows under "Changes". Fetched once and reused for the license
-    // check below. `null` (fetch failed / other platform) leaves the diff unscoped.
+    // Prefer GitLab's authoritative source-vs-target diff over a local
+    // `git diff`. The CI diff base (CI_MERGE_REQUEST_DIFF_BASE_SHA) goes stale
+    // when the source branch merges the target back in: a raw `git diff <base>
+    // HEAD` then also surfaces every other already-merged change — whole files
+    // AND individual hunks inside a file the MR also touched — so the agent
+    // reviews (and bills for) code this MR never introduced. GitLab computes the
+    // true diff; we embed it. `mrChangedFiles` (the authoritative file list) is
+    // reused for the license check below. See getGitlabMrUnifiedDiff.
     let mrChangedFiles: string[] | null = null;
+    let gitlabAuthoritativeDiff: string | null = null;
     if (!localMode && platform === "gitlab") {
       try {
-        mrChangedFiles = await getGitlabMrChangedFiles(owner, repo, prNumber, host);
+        const mrDiff = await getGitlabMrUnifiedDiff(owner, repo, prNumber, host);
+        if (mrDiff) {
+          mrChangedFiles = mrDiff.files;
+          if (mrDiff.hasTooLargeFiles) {
+            logger.warn("GitLab omitted content for one or more too-large files; the agent may need to read them directly");
+          }
+          // Incremental reviews already diff `previousReviewSha...HEAD` (a
+          // correct three-dot range that excludes upstream changes); only full
+          // reviews need the API diff to dodge the stale two-dot base.
+          if (!previousReviewSha) gitlabAuthoritativeDiff = mrDiff.diff;
+        }
       } catch (err) {
-        logger.warn(`Failed to fetch MR changed files for diff scoping: ${err instanceof Error ? err.message : err}`);
+        logger.warn(`Failed to fetch authoritative GitLab MR diff: ${err instanceof Error ? err.message : err}`);
       }
     }
     const diffRestrictPaths =
@@ -1119,29 +1134,48 @@ export async function reviewPr(opts: {
     const MAX_EMBED_BYTES = 200 * 1024; // 200KB
     let embeddedDiff: string | null = null;
     try {
-      const diffArgs = buildEmbeddedDiffArgs({
-        previousReviewSha,
-        diffBaseSha,
-        localMode,
-        targetBranch,
-        restrictPaths: diffRestrictPaths,
-      });
-      if (diffRestrictPaths) {
-        logger.info(`Scoping embedded diff to ${diffRestrictPaths.length} MR-changed file(s) (GitLab authoritative list)`);
+      let rawDiff: string;
+      if (gitlabAuthoritativeDiff !== null) {
+        rawDiff = gitlabAuthoritativeDiff;
+        logger.info(
+          `Using GitLab authoritative MR diff (${Buffer.byteLength(rawDiff, "utf-8")} bytes across ${mrChangedFiles?.length ?? 0} file(s))`,
+        );
+      } else {
+        // GitHub/Gitea/local/incremental: a local git diff is correct here
+        // (three-dot range or working tree). Scope to the MR's files when known.
+        const diffArgs = buildEmbeddedDiffArgs({
+          previousReviewSha,
+          diffBaseSha,
+          localMode,
+          targetBranch,
+          restrictPaths: diffRestrictPaths,
+        });
+        if (diffRestrictPaths) {
+          logger.info(`Scoping embedded diff to ${diffRestrictPaths.length} MR-changed file(s)`);
+        }
+        rawDiff = (await exec("git", diffArgs, { cwd: workspacePath })).stdout;
       }
-      const { stdout: rawDiff } = await exec("git", diffArgs, { cwd: workspacePath });
       const { filtered: filteredDiff, skippedFiles } = filterEmbeddedDiff(rawDiff);
       if (skippedFiles.length > 0) {
         logger.info(`Filtered ${skippedFiles.length} file(s) from embedded diff: ${skippedFiles.join(", ")}`);
       }
-      if (Buffer.byteLength(filteredDiff, "utf-8") <= MAX_EMBED_BYTES) {
+      const filteredBytes = Buffer.byteLength(filteredDiff, "utf-8");
+      if (filteredBytes <= MAX_EMBED_BYTES) {
         embeddedDiff = filteredDiff;
-        logger.info(`Embedding diff in prompt (${Buffer.byteLength(filteredDiff, "utf-8")} bytes, raw: ${Buffer.byteLength(rawDiff, "utf-8")} bytes)`);
+        logger.info(`Embedding diff in prompt (${filteredBytes} bytes, raw: ${Buffer.byteLength(rawDiff, "utf-8")} bytes)`);
+      } else if (gitlabAuthoritativeDiff !== null) {
+        // Too large to inline, but we hold the authoritative content — persist it
+        // so command mode points the agent at this file instead of running an
+        // unscoped, stale local `git diff` (which would reintroduce the leak).
+        authoritativeDiffPath = join(workspacePath, ".hodor-mr-diff.diff");
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(authoritativeDiffPath, filteredDiff, "utf-8");
+        logger.info(`Diff too large to embed (${filteredBytes} bytes); wrote authoritative diff to ${authoritativeDiffPath} for command mode`);
       } else {
-        logger.info(`Diff too large to embed (${Buffer.byteLength(filteredDiff, "utf-8")} bytes filtered, ${Buffer.byteLength(rawDiff, "utf-8")} bytes raw), using command mode`);
+        logger.info(`Diff too large to embed (${filteredBytes} bytes filtered, ${Buffer.byteLength(rawDiff, "utf-8")} bytes raw), using command mode`);
       }
     } catch (err) {
-      logger.warn(`Failed to pre-fetch diff, falling back to command mode: ${err}`);
+      logger.warn(`Failed to prepare diff, falling back to command mode: ${err}`);
     }
 
     // Fetch Jira context (best-effort) if the MR/PR title or description links a Jira issue
@@ -1162,6 +1196,10 @@ export async function reviewPr(opts: {
       customInstructions: customPrompt,
       customPromptFile: promptFile,
       embeddedDiff,
+      authoritativeDiffPath,
+      // The local git diff is unreliable when we sourced GitLab's authoritative
+      // diff (stale CI base); don't let the prompt advertise git-diff commands.
+      suppressGitCommands: gitlabAuthoritativeDiff !== null,
       previousReviewSha,
       localMode,
       jiraContext,
@@ -1598,6 +1636,18 @@ export async function reviewPr(opts: {
 
   } finally {
     activeSession?.dispose();
+
+    // Remove the on-disk authoritative diff (best-effort). A temporary workspace
+    // is deleted wholesale below, but a reused/CI checkout would otherwise keep
+    // the stray file around.
+    if (authoritativeDiffPath) {
+      try {
+        const { rmSync } = await import("node:fs");
+        rmSync(authoritativeDiffPath, { force: true });
+      } catch (err) {
+        logger.warn(`Failed to remove temp diff file ${authoritativeDiffPath}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
 
     // Restore mutated env vars
     for (const [key, val] of Object.entries(envSnapshot)) {

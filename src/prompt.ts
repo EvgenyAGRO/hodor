@@ -20,6 +20,10 @@ export function buildPrReviewPrompt(opts: {
   customInstructions?: string | null;
   customPromptFile?: string | null;
   embeddedDiff?: string | null;
+  authoritativeDiffPath?: string | null;
+  /** When true, the local `git diff` is unreliable (stale CI base) — we sourced
+   *  the diff authoritatively, so the prompt must not advertise git-diff commands. */
+  suppressGitCommands?: boolean;
   previousReviewSha?: string | null;
   localMode?: boolean;
   jiraContext?: string | null;
@@ -33,6 +37,8 @@ export function buildPrReviewPrompt(opts: {
     customInstructions,
     customPromptFile,
     embeddedDiff,
+    authoritativeDiffPath,
+    suppressGitCommands = false,
     previousReviewSha,
     localMode = false,
     jiraContext,
@@ -166,6 +172,38 @@ export function buildPrReviewPrompt(opts: {
     startInstruction = previousReviewSha
       ? "Analyze only the incremental diff provided above. If it is self-contained, submit your review without extra tool calls."
       : "Analyze the diff provided above, then submit your review using `submit_review`.";
+  } else if (authoritativeDiffPath) {
+    // Diff too large to inline, but we saved the authoritative patch to disk.
+    // Point the agent at that file — NOT `git diff`, whose CI base can include
+    // unrelated already-merged changes.
+    embeddedDiffSection =
+      "## Full Diff (Saved to File)\n\n" +
+      "The complete, authoritative MR diff — exactly what GitLab shows under " +
+      `"Changes" — is saved to a file (too large to inline here):\n\n` +
+      "```\n" + authoritativeDiffPath + "\n```\n\n" +
+      "Inspect it with `read` (or `grep` for patterns) on THAT file. " +
+      "**Do NOT run `git diff`** — the CI checkout's diff base can pull in " +
+      "unrelated changes already merged into the target branch.\n";
+
+    diffFetchInstructions =
+      "## Review the Saved Diff File\n\n" +
+      "### Critical Rules\n" +
+      `- The authoritative diff is the file at \`${authoritativeDiffPath}\`\n` +
+      "- ONLY review files/hunks present in that diff file\n" +
+      "- ONLY analyze actual code changes (+ and - lines)\n" +
+      "- Use `read`/`grep` on the diff file; **never** run `git diff`\n" +
+      "- NEVER review files not in the diff file\n" +
+      `- NEVER compare the entire codebase to ${targetBranch} - DIFF ONLY\n`;
+
+    reviewProcessSection =
+      "## Review Process\n\n" +
+      `1. Read \`${authoritativeDiffPath}\` (or grep it) to see the changes\n` +
+      "2. Use `grep` on the diff file to find patterns when needed\n" +
+      "3. Use `read` on source files only when surrounding context is essential\n" +
+      "4. Submit your review using `submit_review`\n";
+
+    startInstruction =
+      `Read the diff file at \`${authoritativeDiffPath}\` (or grep it), then submit your review using \`submit_review\`.`;
   } else {
     embeddedDiffSection = "";
 
@@ -203,11 +241,31 @@ export function buildPrReviewPrompt(opts: {
       `Start by running \`${prDiffCmd}\` to list the changed files, then analyze each file individually using \`${gitDiffCmd} -- path/to/file\`.`;
   }
 
+  // "Available commands" list. When the local git diff is unreliable (GitLab's
+  // stale CI base), do not advertise git-diff commands — steer to the embedded
+  // diff / saved file instead, so the agent can't reintroduce the leak.
+  let diffCommandSection: string;
+  if (suppressGitCommands) {
+    const where = embeddedDiff
+      ? "in the diff above"
+      : authoritativeDiffPath
+        ? `in the file \`${authoritativeDiffPath}\``
+        : "already provided above";
+    diffCommandSection =
+      `- The authoritative MR diff is ${where}; inspect it with \`read\`/\`grep\`\n` +
+      "- Do NOT run `git diff` — the CI checkout's diff base can include unrelated changes already merged into the target branch";
+  } else {
+    diffCommandSection =
+      `- \`${prDiffCmd}\` - List changed files ONLY (run this FIRST, not full diff)\n` +
+      `- \`${gitDiffCmd} -- path/to/file\` - See changes for ONE specific file at a time`;
+  }
+
   // Step 4: Interpolate
   let prompt = templateText
     .replace(/\{pr_url\}/g, prUrl)
     .replace(/\{pr_diff_cmd\}/g, prDiffCmd)
     .replace(/\{git_diff_cmd\}/g, gitDiffCmd)
+    .replace(/\{diff_command_section\}/g, diffCommandSection)
     .replace(/\{target_branch\}/g, targetBranch)
     .replace(/\{diff_explanation\}/g, diffExplanation)
     .replace(/\{mr_context_section\}/g, contextSection)
