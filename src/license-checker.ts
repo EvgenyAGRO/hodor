@@ -721,14 +721,73 @@ function findDependencyLine(fileContent: string, name: string, ecosystem: Ecosys
  * merge into ReviewOutput.findings. Best-effort throughout: a registry
  * lookup failure for one package doesn't block the others or the review.
  */
+/** Added lines (`+`, excluding the `+++` header), keyed by new-file path. */
+export function addedLinesByFile(diffText: string): Map<string, string[]> {
+  const byFile = new Map<string, string[]>();
+  let current: string | null = null;
+  for (const line of diffText.split("\n")) {
+    if (line.startsWith("+++ ")) {
+      let p = line.slice(4).trim();
+      if (p.startsWith("b/")) p = p.slice(2);
+      current = p === "/dev/null" ? null : p;
+      if (current && !byFile.has(current)) byFile.set(current, []);
+      continue;
+    }
+    if (line.startsWith("diff --git ") || line.startsWith("--- ")) continue;
+    if (current && line.startsWith("+")) {
+      byFile.get(current)?.push(line.slice(1));
+    }
+  }
+  return byFile;
+}
+
+/** Tokens that identify a dependency in its manifest's added lines. */
+function dependencyMatchTokens(change: DependencyChange): string[] {
+  const tokens: string[] = [];
+  if (change.ecosystem === "maven") {
+    const artifactId = change.name.split(":").pop();
+    if (artifactId) tokens.push(artifactId);
+  } else {
+    tokens.push(change.name);
+  }
+  if (change.version) tokens.push(change.version);
+  return tokens.filter(Boolean);
+}
+
+/**
+ * Keep only dependency changes this MR actually introduced, per the authoritative
+ * source-vs-target diff. A `git diff` against the stale CI base compares whole
+ * manifests, so a dependency that the *target* branch added to a manifest the MR
+ * also edits looks newly added here. We drop any change whose identifying token
+ * (maven artifactId, else package name, or the version) never appears on an
+ * added line of that manifest in the authoritative diff. Permissive by design —
+ * it only removes clearly target-only deps, never a dep the MR truly touched.
+ */
+export function filterChangesToAuthoritativeDiff(
+  changes: DependencyChange[],
+  diffText: string,
+): DependencyChange[] {
+  const added = addedLinesByFile(diffText);
+  return changes.filter((change) => {
+    const lines = added.get(change.manifestPath);
+    if (!lines || lines.length === 0) return false;
+    const tokens = dependencyMatchTokens(change);
+    return tokens.some((token) => lines.some((line) => line.includes(token)));
+  });
+}
+
 export async function buildLicenseFindings(opts: {
   workspacePath: string;
   baseRef: string;
   headRef?: string;
   useWorkingTree?: boolean;
   restrictToPaths?: string[];
+  /** Authoritative source-vs-target diff (GitLab). When present, dependency
+   *  changes are filtered to what this MR actually added — see
+   *  filterChangesToAuthoritativeDiff. */
+  authoritativeDiff?: string | null;
 }): Promise<ReviewFinding[]> {
-  const { workspacePath, baseRef, headRef = "HEAD", useWorkingTree = false, restrictToPaths } = opts;
+  const { workspacePath, baseRef, headRef = "HEAD", useWorkingTree = false, restrictToPaths, authoritativeDiff } = opts;
 
   let changes = await findManifestDependencyChanges(
     workspacePath,
@@ -738,6 +797,16 @@ export async function buildLicenseFindings(opts: {
     restrictToPaths ? new Set(restrictToPaths) : undefined,
   );
   if (changes.length === 0) return [];
+
+  // Ground the comparison in GitLab's true diff so a manifest the target branch
+  // also changed doesn't leak target-only dependencies into this MR's findings.
+  if (authoritativeDiff) {
+    const before = changes.length;
+    changes = filterChangesToAuthoritativeDiff(changes, authoritativeDiff);
+    const dropped = before - changes.length;
+    if (dropped > 0) logger.info(`License check: dropped ${dropped} dependency change(s) not in the MR's authoritative diff`);
+    if (changes.length === 0) return [];
+  }
 
   // Skip first-party/internal dependencies — they aren't published to public
   // registries, so a license lookup always fails and yields pure "unverified"

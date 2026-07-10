@@ -107,4 +107,98 @@ describe("buildPrReviewPrompt", () => {
     expect(prompt).toContain("Type/API invariant lens");
     expect(prompt).toContain("Simplification lens");
   });
+
+  it("advertises git-diff commands in plain command mode", () => {
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://github.com/acme/hodor/pull/42",
+      platform: "github",
+      targetBranch: "main",
+    });
+
+    expect(prompt).toContain("git --no-pager diff origin/main...HEAD");
+  });
+
+  it("embeds the diff inline and suppresses git-diff commands when authoritative", () => {
+    const staleCmd = "git --no-pager diff 1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d HEAD";
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+      embeddedDiff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n",
+      suppressGitCommands: true,
+    });
+
+    expect(prompt).toContain("Full Diff (Pre-fetched)");
+    expect(prompt).toContain("Do NOT run `git diff`");
+    // The stale two-dot base command must appear nowhere in the prompt.
+    expect(prompt).not.toContain(staleCmd);
+  });
+
+  it("points the agent at the saved diff file (not git diff) when too large to embed", () => {
+    const diffPath = "/builds/acme/hodor/.hodor-mr-diff.diff";
+    const staleCmd = "git --no-pager diff 1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d HEAD";
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+      embeddedDiff: null,
+      authoritativeDiffPath: diffPath,
+      suppressGitCommands: true,
+    });
+
+    expect(prompt).toContain("Full Diff (Saved to File)");
+    expect(prompt).toContain(diffPath);
+    expect(prompt).toContain("Do NOT run `git diff`");
+    expect(prompt).not.toContain(staleCmd);
+  });
+
+  it("treats an empty embedded diff as 'no reviewable changes', not command mode", () => {
+    const staleCmd = "git --no-pager diff 1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d HEAD";
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+      embeddedDiff: "",
+      suppressGitCommands: true,
+    });
+
+    expect(prompt).toContain("No reviewable code changes");
+    // Must NOT fall through to the stale command mode.
+    expect(prompt).not.toContain(staleCmd);
+  });
+
+  it("lists too-large omitted files and tells the agent to read them", () => {
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      embeddedDiff: "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n",
+      suppressGitCommands: true,
+      tooLargeFiles: ["big/Generated.java"],
+    });
+
+    expect(prompt).toContain("Files Omitted From the Diff (Too Large)");
+    expect(prompt).toContain("big/Generated.java");
+    expect(prompt).toContain("Inspect each one with `read`");
+  });
+
+  it("points to too-large files even when the rest of the diff is empty", () => {
+    const staleCmd = "git --no-pager diff 1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d HEAD";
+    const prompt = buildPrReviewPrompt({
+      prUrl: "https://gitlab.com/acme/hodor/-/merge_requests/42",
+      platform: "gitlab",
+      targetBranch: "develop",
+      diffBaseSha: "1e8a628d1e8a628d1e8a628d1e8a628d1e8a628d",
+      embeddedDiff: "",
+      suppressGitCommands: true,
+      tooLargeFiles: ["big/Generated.java"],
+    });
+
+    expect(prompt).toContain("big/Generated.java");
+    expect(prompt).not.toContain("No reviewable code changes");
+    expect(prompt).not.toContain(staleCmd);
+  });
 });

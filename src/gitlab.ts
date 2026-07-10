@@ -487,23 +487,65 @@ export async function getGitlabMrDiffLineMap(
   return result;
 }
 
+export interface GitlabMrDiff {
+  /** Reconstructed git-format unified diff — the authoritative source-vs-target
+   *  patch, exactly what GitLab shows under "Changes". */
+  diff: string;
+  /** Union of old_path/new_path across every changed file. */
+  files: string[];
+  /** Paths GitLab flagged `too_large` — their hunks are omitted from `diff`, so
+   *  the agent must inspect them directly. */
+  tooLargeFiles: string[];
+}
+
+/** Rebuild one file's `diff --git` section from a GitLab `/diffs` entry. */
+function reconstructGitDiffSection(
+  change: Record<string, unknown>,
+  oldPath: string | undefined,
+  newPath: string | undefined,
+): string {
+  const a = oldPath ?? newPath ?? "dev/null";
+  const b = newPath ?? oldPath ?? "dev/null";
+  const body = typeof change.diff === "string" ? change.diff : "";
+  const lines = [`diff --git a/${a} b/${b}`];
+  if (change.new_file === true) {
+    lines.push(`new file mode ${typeof change.b_mode === "string" ? change.b_mode : "100644"}`);
+  } else if (change.deleted_file === true) {
+    lines.push(`deleted file mode ${typeof change.a_mode === "string" ? change.a_mode : "100644"}`);
+  } else if (change.renamed_file === true) {
+    lines.push(`rename from ${a}`, `rename to ${b}`);
+  }
+  lines.push(change.new_file === true ? "--- /dev/null" : `--- a/${a}`);
+  lines.push(change.deleted_file === true ? "+++ /dev/null" : `+++ b/${b}`);
+  let section = lines.join("\n") + "\n";
+  if (body) section += body.endsWith("\n") ? body : `${body}\n`;
+  return section;
+}
+
 /**
- * The set of files an MR actually changes, per GitLab's own MR diff. This is
- * the authoritative source-vs-target file list — unlike a local `git diff`
- * against the merge-base, which on a CI merge-ref checkout also sweeps in
- * unrelated changes already merged into the target branch. Used to scope the
- * dependency-license check to the MR's real manifests. Returns null on failure
- * so callers can fall back to the unscoped behavior.
+ * Fetch the MR's authoritative unified diff from GitLab's `/diffs` endpoint and
+ * reconstruct it into git format (`diff --git` + `---`/`+++` + hunks) so the
+ * rest of Hodor can treat it like a local `git diff`.
+ *
+ * Why not a local `git diff <base> HEAD`? The CI diff base
+ * (`CI_MERGE_REQUEST_DIFF_BASE_SHA`) goes stale when the source branch merges
+ * the target back in, so a local diff sweeps in unrelated already-merged
+ * changes — both whole files AND individual hunks inside a file the MR also
+ * touched. A `-- <paths>` pathspec only removes the whole-file leaks. GitLab
+ * computes the true source-vs-target diff; embedding it fixes both. Returns
+ * null on failure so callers can fall back to the local-diff behavior.
  */
-export async function getGitlabMrChangedFiles(
+export async function getGitlabMrUnifiedDiff(
   owner: string,
   repo: string,
   mrNumber: number | string,
   host?: string | null,
-): Promise<string[] | null> {
+): Promise<GitlabMrDiff | null> {
   const encoded = encodedProjectPath(owner, repo);
   const env = glabEnv(host);
-  const paths = new Set<string>();
+  const files = new Set<string>();
+  const tooLargeFiles = new Set<string>();
+  const sections: string[] = [];
   try {
     for (let page = 1; page <= 20; page++) {
       const changes = await execJson<Array<Record<string, unknown>>>(
@@ -513,14 +555,19 @@ export async function getGitlabMrChangedFiles(
       );
       if (!Array.isArray(changes) || changes.length === 0) break;
       for (const change of changes) {
-        if (typeof change.new_path === "string") paths.add(change.new_path);
-        if (typeof change.old_path === "string") paths.add(change.old_path);
+        const oldPath = typeof change.old_path === "string" ? change.old_path : undefined;
+        const newPath = typeof change.new_path === "string" ? change.new_path : undefined;
+        if (oldPath) files.add(oldPath);
+        if (newPath) files.add(newPath);
+        if (change.too_large === true) tooLargeFiles.add(newPath ?? oldPath ?? "");
+        sections.push(reconstructGitDiffSection(change, oldPath, newPath));
       }
       if (changes.length < 50) break;
     }
-    return [...paths];
+    tooLargeFiles.delete("");
+    return { diff: sections.join(""), files: [...files], tooLargeFiles: [...tooLargeFiles] };
   } catch (err) {
-    logger.warn(`Failed to fetch MR changed files: ${err instanceof Error ? err.message : err}`);
+    logger.warn(`Failed to fetch MR unified diff: ${err instanceof Error ? err.message : err}`);
     return null;
   }
 }

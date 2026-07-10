@@ -378,4 +378,130 @@ describe("reviewPr submit_review recovery", () => {
     expect(mocks.createAgentSession).toHaveBeenCalledTimes(2);
     expect(mocks.prompts).toHaveLength(4);
   });
+
+  it("aborts a runaway agent at the turn cap and captures the review via recovery", async () => {
+    const RUNAWAY_SAFETY_LIMIT = 100;
+    let abortCount = 0;
+
+    // Override the shared mock with a session whose first run never submits and
+    // would loop forever if not stopped; the second (recovery) run submits.
+    mocks.createAgentSession.mockImplementation(async (opts: {
+      customTools: Array<{
+        name: string;
+        execute: (toolCallId: string, params: unknown) => Promise<{ content: unknown; details: unknown }>;
+      }>;
+    }) => {
+      const { customTools } = opts;
+      const messages: Array<Record<string, unknown>> = [];
+      const subscribers: Array<(event: Record<string, unknown>) => void> = [];
+      const state: Record<string, unknown> = {};
+      let aborted = false;
+
+      const emit = (event: Record<string, unknown>): void => {
+        for (const subscriber of subscribers) subscriber(event);
+      };
+      const getLastAssistantText = (): string => {
+        const assistant = [...messages].reverse().find((msg) => msg.role === "assistant");
+        const content = assistant?.content;
+        if (!Array.isArray(content)) return "";
+        return content
+          .map((item) => {
+            const block = item as { type?: string; text?: string };
+            return block.type === "text" ? block.text ?? "" : "";
+          })
+          .join("");
+      };
+      const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } };
+
+      return {
+        session: {
+          messages,
+          state,
+          subscribe: (subscriber: (event: Record<string, unknown>) => void) => {
+            subscribers.push(subscriber);
+            return () => {};
+          },
+          dispose: vi.fn(),
+          getLastAssistantText,
+          // Mirrors pi-agent-core: an aborted run lands an assistant failure
+          // message and sets state.errorMessage.
+          abort: vi.fn(async () => {
+            abortCount++;
+            aborted = true;
+            state.errorMessage = "The operation was aborted";
+          }),
+          prompt: vi.fn(async (prompt: string) => {
+            mocks.prompts.push(prompt);
+            aborted = false;
+            emit({ type: "agent_start" });
+
+            if (mocks.prompts.length === 1) {
+              // Runaway exploration: keep taking turns until the cap aborts us.
+              for (let i = 0; i < RUNAWAY_SAFETY_LIMIT && !aborted; i++) {
+                emit({ type: "turn_start" });
+                emit({ type: "turn_end" });
+              }
+              messages.push({
+                role: "assistant",
+                stopReason: "aborted",
+                content: [],
+                errorMessage: "The operation was aborted",
+                usage,
+              });
+            } else {
+              // Recovery run: submit immediately within the granted grace.
+              emit({ type: "turn_start" });
+              const submitReview = customTools.find((tool) => tool.name === "submit_review");
+              if (!submitReview) throw new Error("submit_review tool was not registered");
+              const result = await submitReview.execute("tool-1", {
+                findings: [],
+                overall_correctness: "patch is correct",
+                overall_explanation: "No production issues were found.",
+              });
+              messages.push({
+                role: "assistant",
+                stopReason: "tool_use",
+                content: [{ type: "toolCall", name: "submit_review", arguments: {} }],
+                usage,
+              });
+              messages.push({
+                role: "toolResult",
+                toolCallId: "tool-1",
+                toolName: "submit_review",
+                content: result.content,
+                details: result.details,
+              });
+              emit({ type: "turn_end" });
+            }
+            emit({ type: "agent_end" });
+          }),
+        },
+      };
+    });
+
+    const previous = process.env.HODOR_MAX_TURNS;
+    process.env.HODOR_MAX_TURNS = "3";
+    try {
+      const result = await reviewPr({
+        localMode: true,
+        workspaceDir: "/tmp/hodor-recovery",
+        cleanup: false,
+        model: "anthropic/test-model",
+        maxRetriesWhenStuck: 0,
+        skipLicenseCheck: true,
+      });
+
+      expect(result.review.overall_correctness).toBe("patch is correct");
+      // Abort fired, the runaway loop stopped well short of the safety limit,
+      // and only one recovery prompt was needed.
+      expect(abortCount).toBeGreaterThanOrEqual(1);
+      expect(result.metrics.turns).toBeLessThan(RUNAWAY_SAFETY_LIMIT);
+      expect(result.metrics.turns).toBeGreaterThan(3);
+      expect(mocks.prompts).toHaveLength(2);
+      expect(mocks.prompts[1]).toContain("without a valid `submit_review` tool call");
+    } finally {
+      if (previous === undefined) delete process.env.HODOR_MAX_TURNS;
+      else process.env.HODOR_MAX_TURNS = previous;
+    }
+  });
 });
