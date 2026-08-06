@@ -160,15 +160,23 @@ export async function postGitlabReviewCommitStatus(
   parsed: ParsedPrUrl,
   review: ReviewOutput,
   diffRefs: DiffRefs,
+  opts?: { truncated?: boolean },
 ): Promise<void> {
   const blocking = review.findings.filter((f) => f.priority <= 1).length;
-  const state = blocking > 0 ? "failed" : "success";
+  // A truncated review never finished looking, so "no blocking issues" is an
+  // absence of evidence, not evidence of absence. Reporting success there would
+  // greenlight a merge on a review that was cut off mid-analysis — the whole
+  // failure this release set out to make visible. Findings still win: a P0 found
+  // before the cap tripped is real and should read as blocking.
+  const state = blocking > 0 ? "failed" : opts?.truncated ? "failed" : "success";
   const description =
     blocking > 0
       ? `${blocking} blocking issue(s) found`
-      : review.findings.length > 0
-        ? `${review.findings.length} non-blocking issue(s)`
-        : "No issues found";
+      : opts?.truncated
+        ? "Review incomplete (turn cap) — findings may be missing"
+        : review.findings.length > 0
+          ? `${review.findings.length} non-blocking issue(s)`
+          : "No issues found";
 
   await postGitlabCommitStatus(
     parsed.owner,
@@ -176,7 +184,14 @@ export async function postGitlabReviewCommitStatus(
     diffRefs.head_sha,
     state,
     parsed.host,
-    { description },
+    {
+      description,
+      // Bind to the running pipeline so GitLab cannot spawn a stray `external`
+      // pipeline for a SHA that has none — which is the norm on merged-results
+      // pipelines, where the pipeline SHA is the merge commit but this status
+      // targets the diff head.
+      pipelineId: process.env.CI_PIPELINE_ID,
+    },
   );
 }
 
@@ -326,6 +341,7 @@ export async function postReviewStructured(opts: {
   codeQualityPath?: string | null;
   headSha?: string | null;
   workspacePath?: string | null;
+  truncated?: boolean;
 }): Promise<PostCommentResult> {
   const {
     prUrl,
@@ -337,6 +353,7 @@ export async function postReviewStructured(opts: {
     codeQualityPath,
     headSha,
     workspacePath,
+    truncated,
   } = opts;
 
   const platform = detectPlatform(prUrl);
@@ -574,7 +591,7 @@ export async function postReviewStructured(opts: {
 
   if (commitStatus && diffRefs) {
     try {
-      await postGitlabReviewCommitStatus(parsed, dedupedReview, diffRefs);
+      await postGitlabReviewCommitStatus(parsed, dedupedReview, diffRefs, { truncated });
       logger.info("Posted commit status");
       statusPosted = true;
     } catch (err) {
@@ -656,10 +673,15 @@ export function buildEmbeddedDiffArgs(opts: {
   localMode: boolean;
   targetBranch: string;
   restrictPaths?: string[] | null;
+  sourceHeadRef?: string | null;
 }): string[] {
   const { previousReviewSha, diffBaseSha, localMode, targetBranch, restrictPaths } = opts;
+  // `sourceHeadRef` defaults to HEAD, which is correct on GitHub/Gitea (HEAD is
+  // the PR branch tip). On a GitLab merged-results pipeline the caller passes the
+  // source-branch SHA instead — see the comment at its definition.
+  const sourceHeadRef = opts.sourceHeadRef?.trim() || "HEAD";
   const args = previousReviewSha
-    ? ["--no-pager", "diff", `${previousReviewSha}...HEAD`]
+    ? ["--no-pager", "diff", `${previousReviewSha}...${sourceHeadRef}`]
     : diffBaseSha
       ? ["--no-pager", "diff", diffBaseSha, "HEAD"]
       : localMode
@@ -881,7 +903,7 @@ export async function reviewPr(opts: {
   targetBranchOverride?: string;
   maxRetriesWhenStuck?: number;
   skipLicenseCheck?: boolean;
-}): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null; metrics: ReviewMetrics; workspacePath: string }> {
+}): Promise<{ review: ReviewOutput; metricsFooter: string | null; headSha: string | null; truncated: boolean; metrics: ReviewMetrics; workspacePath: string }> {
   const {
     prUrl,
     model = "anthropic/claude-sonnet-4-5-20250929",
@@ -1114,12 +1136,19 @@ export async function reviewPr(opts: {
     // SHA embedded in posted comments, and read back on the next run to diff
     // incrementally (skip in local mode — no posting).
     let headSha: string | null = null;
+    // Endpoint of the incremental diff range. On a merged-results pipeline HEAD
+    // is the merge commit, and since the marker SHA is an ancestor of it,
+    // `marker...HEAD` collapses to a plain two-dot `diff marker HEAD` — which
+    // carries every change merged to the target since the source last synced.
+    // Diffing to the source tip instead keeps the range source-only.
+    let sourceHeadRef = "HEAD";
     if (!localMode) {
       const { stdout: headShaRaw } = await exec("git", ["rev-parse", "HEAD"], { cwd: workspacePath });
       headSha = resolveReviewMarkerSha(
         process.env.CI_MERGE_REQUEST_SOURCE_BRANCH_SHA,
         headShaRaw.trim(),
       );
+      sourceHeadRef = headSha;
     }
 
     // Base ref for the PR/MR diff, reused for dependency-license checking below.
@@ -1148,9 +1177,9 @@ export async function reviewPr(opts: {
           if (tooLargeFiles.length > 0) {
             logger.warn(`GitLab omitted content for ${tooLargeFiles.length} too-large file(s); the agent is told to inspect them directly`);
           }
-          // Incremental reviews already diff `previousReviewSha...HEAD` (a
-          // correct three-dot range that excludes upstream changes); only full
-          // reviews need the API diff to dodge the stale two-dot base.
+          // Incremental reviews diff `previousReviewSha...sourceHeadRef`, which
+          // stays on the source branch and so excludes upstream changes; only
+          // full reviews need the API diff to dodge the stale two-dot base.
           if (!previousReviewSha) gitlabAuthoritativeDiff = mrDiff.diff;
         }
       } catch (err) {
@@ -1179,6 +1208,7 @@ export async function reviewPr(opts: {
           localMode,
           targetBranch,
           restrictPaths: diffRestrictPaths,
+          sourceHeadRef,
         });
         if (diffRestrictPaths) {
           logger.info(`Scoping embedded diff to ${diffRestrictPaths.length} MR-changed file(s)`);
@@ -1669,7 +1699,30 @@ export async function reviewPr(opts: {
           metricsFooter = formatMetricsMarkdown(metrics);
         }
 
-        return { review, metricsFooter, headSha, metrics, workspacePath };
+        // A truncated review must not become the baseline for the next run's
+        // incremental diff. Dropping the marker forces the next run to review
+        // the whole diff again.
+        //
+        // Without this, the two fixes in this change combine into a trap: the
+        // marker now validates as an ancestor (it didn't before), so re-running
+        // without pushing — exactly what the truncation warning tells you to do —
+        // yields an EMPTY incremental diff. The prompt then instructs the agent
+        // to submit `findings: []` / "patch is correct", and that unwarned clean
+        // review lands as the newest comment over the warned one. The code the
+        // agent never got to would stay unreviewed until someone ran --full.
+        if (turnLimitReached && headSha) {
+          logger.warn(
+            "Not recording a review marker: this review was truncated, so the next run must do a full review.",
+          );
+        }
+        return {
+          review,
+          metricsFooter,
+          headSha: turnLimitReached ? null : headSha,
+          truncated: turnLimitReached,
+          metrics,
+          workspacePath,
+        };
       } catch (err) {
         if ((err instanceof StuckPatternError || err instanceof ToolErrorLoopError) && !isLastAttempt) {
           logger.warn(`${err.message}`);

@@ -140,13 +140,18 @@ describe("verdict grading", () => {
     });
   }
 
-  it("falls back to overall_correctness when there are no findings to grade", () => {
+  it("ignores a stale overall_correctness when every finding was deduped away", () => {
+    // postReviewStructured() drops already-posted findings but keeps the
+    // original overall_correctness. Honoring that boolean would print "blocking
+    // issues" above a 0/0/0 table and disagree with the commit status, which
+    // grades from findings.
     const review: ReviewOutput = {
       findings: [],
       overall_correctness: "patch is incorrect",
-      overall_explanation: "Could not complete the review.",
+      overall_explanation: "All findings were already reported on an earlier review.",
     };
-    expect(renderMarkdown(review)).toContain("**Status**: Patch has blocking issues");
+    expect(renderMarkdown(review)).toContain("**Status**: Patch is correct");
+    expect(renderSummaryMarkdown(review)).toContain("**Overall verdict**: Patch is correct");
   });
 });
 

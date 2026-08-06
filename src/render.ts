@@ -124,9 +124,13 @@ function verdictLabel(review: ReviewOutput): string {
   const blocking = review.findings.filter((f) => f.priority <= 1).length;
   if (blocking > 0) return "Patch has blocking issues";
   if (review.findings.length > 0) return "Patch has non-blocking issues";
-  return review.overall_correctness === "patch is correct"
-    ? "Patch is correct"
-    : "Patch has blocking issues";
+  // Graded purely from findings, deliberately ignoring overall_correctness.
+  // validateReviewOutput() forces 0 findings => "patch is correct", so the two
+  // only diverge after postReviewStructured() dedupes already-posted findings
+  // away while keeping the original correctness. Honoring the stale boolean
+  // there would print "Patch has blocking issues" above a 0/0/0 table and
+  // contradict the commit status, which grades from findings too.
+  return "Patch is correct";
 }
 
 function formatFinding(f: ReviewFinding): string {

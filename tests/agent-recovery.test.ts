@@ -375,6 +375,10 @@ describe("reviewPr submit_review recovery", () => {
     });
 
     expect(result.review.overall_correctness).toBe("patch is correct");
+    // A retry-from-scratch that finishes inside the cap is NOT truncated, so it
+    // must not carry the warning or suppress the marker.
+    expect(result.truncated).toBe(false);
+    expect(result.review.overall_explanation).not.toContain("This review is incomplete");
     expect(mocks.createAgentSession).toHaveBeenCalledTimes(2);
     expect(mocks.prompts).toHaveLength(4);
   });
@@ -500,6 +504,12 @@ describe("reviewPr submit_review recovery", () => {
       expect(result.review.overall_explanation).toContain("3-turn cap");
       // The model's own explanation is preserved after the warning.
       expect(result.review.overall_explanation).toContain("No production issues were found.");
+      // Flagged as truncated, which is what suppresses the incremental marker and
+      // keeps the commit status from reporting a clean pass. Without it, a re-run
+      // would diff against this truncated review, find nothing, and post an
+      // unwarned "patch is correct" over the warning.
+      expect(result.truncated).toBe(true);
+      expect(result.headSha).toBeNull();
       // Abort fired, the runaway loop stopped well short of the safety limit,
       // and only one recovery prompt was needed.
       expect(abortCount).toBeGreaterThanOrEqual(1);
