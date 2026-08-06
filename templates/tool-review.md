@@ -33,6 +33,17 @@ export GIT_PAGER=cat
 - `grep` - Search for patterns across multiple files efficiently
 - `submit_review` - Submit the final structured review when analysis is complete
 
+**No build toolchain is available.** The workspace has a checkout and nothing
+else: no compiler, no package manager (`mvn`, `gradle`, `npm`, `pip`, `go`, …),
+no test runner, and no network access. Do not try to build, compile, install
+dependencies, or run tests — every such attempt fails, wastes a turn, and counts
+against your turn budget. Reason about correctness from the source itself.
+
+**Your turn budget is finite.** Exploration is capped, and if you exhaust the cap
+your review is truncated and submitted incomplete. Spend turns on the diff and
+the contracts it directly touches; do not survey the repository. In a large
+monorepo, prefer one targeted `grep` over a sequence of speculative `find`s.
+
 ## Review Guidelines
 
 You are acting as a reviewer for a proposed code change made by another engineer.

@@ -8,6 +8,7 @@ import {
   parseReviewFromAssistantText,
   parsePrUrl,
   resolveMaxAgentTurns,
+  resolveReviewMarkerSha,
 } from "../src/agent.js";
 import { formatMetricsMarkdown } from "../src/metrics.js";
 import type { ReviewMetrics } from "../src/types.js";
@@ -530,5 +531,26 @@ describe("resolveMaxAgentTurns", () => {
     expect(resolveMaxAgentTurns("-5")).toBe(25);
     expect(resolveMaxAgentTurns("abc")).toBe(25);
     expect(resolveMaxAgentTurns("NaN")).toBe(25);
+  });
+});
+
+describe("resolveReviewMarkerSha", () => {
+  const MERGE_COMMIT = "4938ea5ac612df24a487a8afd1c8595bbdb56d33";
+  const SOURCE_SHA = "3ab8514a9d11781d170b756b7aa0aec2b62b0827";
+
+  it("prefers the CI source-branch SHA over the ephemeral merge commit", () => {
+    // On refs/merge-requests/N/merge, HEAD is regenerated on every push, so
+    // recording it permanently disables incremental review.
+    expect(resolveReviewMarkerSha(SOURCE_SHA, MERGE_COMMIT)).toBe(SOURCE_SHA);
+  });
+
+  it("falls back to git HEAD outside a merge-request pipeline", () => {
+    expect(resolveReviewMarkerSha(undefined, MERGE_COMMIT)).toBe(MERGE_COMMIT);
+    expect(resolveReviewMarkerSha("", MERGE_COMMIT)).toBe(MERGE_COMMIT);
+    expect(resolveReviewMarkerSha("   ", MERGE_COMMIT)).toBe(MERGE_COMMIT);
+  });
+
+  it("trims whitespace from the CI value", () => {
+    expect(resolveReviewMarkerSha(`  ${SOURCE_SHA}\n`, MERGE_COMMIT)).toBe(SOURCE_SHA);
   });
 });

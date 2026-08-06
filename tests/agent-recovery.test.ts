@@ -492,6 +492,14 @@ describe("reviewPr submit_review recovery", () => {
       });
 
       expect(result.review.overall_correctness).toBe("patch is correct");
+      // The recovery submission is NOT a genuine clean review — the agent was
+      // cut off mid-analysis. Unless the verdict says so, a truncated run is
+      // indistinguishable from a real pass on the MR (backend/java job
+      // 15693462810 posted exactly this as "Patch is correct, 0 findings").
+      expect(result.review.overall_explanation).toContain("This review is incomplete");
+      expect(result.review.overall_explanation).toContain("3-turn cap");
+      // The model's own explanation is preserved after the warning.
+      expect(result.review.overall_explanation).toContain("No production issues were found.");
       // Abort fired, the runaway loop stopped well short of the safety limit,
       // and only one recovery prompt was needed.
       expect(abortCount).toBeGreaterThanOrEqual(1);

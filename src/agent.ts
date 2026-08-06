@@ -682,6 +682,28 @@ const SUBMIT_REVIEW_RECOVERY_ATTEMPTS = 2;
 const DEFAULT_MAX_AGENT_TURNS = 25;
 const RECOVERY_TURN_GRACE = 3;
 
+/**
+ * SHA to embed in the posted review — and therefore the base the *next* run
+ * diffs against for an incremental review.
+ *
+ * On a GitLab merged-results pipeline the checkout is `refs/merge-requests/N/merge`,
+ * so `git rev-parse HEAD` is an ephemeral merge commit that GitLab regenerates on
+ * every push and every target-branch move. Such a commit can never be an ancestor
+ * of a later run's HEAD, so `findLatestValidReviewSha()` rejects it every time and
+ * incremental mode never engages — every review re-reads the entire diff.
+ *
+ * The source-branch SHA is stable and *is* an ancestor of the next merge commit,
+ * so prefer it whenever CI provides it. A force-push orphans it, the ancestor
+ * check fails, and the run correctly falls back to a full review.
+ */
+export function resolveReviewMarkerSha(
+  ciSourceBranchSha: string | undefined,
+  gitHeadSha: string,
+): string {
+  const trimmed = ciSourceBranchSha?.trim();
+  return trimmed ? trimmed : gitHeadSha;
+}
+
 /** Resolve the agent turn cap from HODOR_MAX_TURNS, falling back to the default. */
 export function resolveMaxAgentTurns(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_AGENT_TURNS;
@@ -1089,11 +1111,15 @@ export async function reviewPr(opts: {
       logger.info(`Incremental mode: previous review at ${previousReviewSha.slice(0, 8)}`);
     }
 
-    // Get HEAD SHA for embedding in posted comments (skip in local mode — no posting)
+    // SHA embedded in posted comments, and read back on the next run to diff
+    // incrementally (skip in local mode — no posting).
     let headSha: string | null = null;
     if (!localMode) {
       const { stdout: headShaRaw } = await exec("git", ["rev-parse", "HEAD"], { cwd: workspacePath });
-      headSha = headShaRaw.trim();
+      headSha = resolveReviewMarkerSha(
+        process.env.CI_MERGE_REQUEST_SOURCE_BRANCH_SHA,
+        headShaRaw.trim(),
+      );
     }
 
     // Base ref for the PR/MR diff, reused for dependency-license checking below.
@@ -1537,6 +1563,21 @@ export async function reviewPr(opts: {
             `Location resolution: ${locationStats.corrected} corrected, ${locationStats.confirmed} confirmed, ` +
               `${locationStats.unmatched} unmatched, ${locationStats.noSnippet} without snippet`,
           );
+        }
+
+        // A turn-cap abort cuts exploration off mid-flight and the recovery
+        // prompt then submits whatever the agent happens to have — very often
+        // zero findings. Rendered as-is that is indistinguishable from a
+        // genuine clean review, so a truncated run must say so on the MR.
+        if (turnLimitReached) {
+          logger.warn(
+            "Review was truncated by the turn cap; annotating the verdict so it is not read as a clean review.",
+          );
+          review.overall_explanation =
+            `⚠️ **This review is incomplete.** The agent hit the ${maxAgentTurns}-turn cap and was ` +
+            `aborted mid-analysis; the verdict below reflects only what it had examined by then. ` +
+            `Do not read it as a clean bill of health — re-run with a higher \`HODOR_MAX_TURNS\`. ` +
+            review.overall_explanation;
         }
 
         if (!skipLicenseCheck) {

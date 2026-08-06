@@ -74,6 +74,25 @@ describe("health checks", () => {
     expect(failedChecks(report)).toContainEqual(expect.objectContaining({ name: "GitLab Token" }));
   });
 
+  it("runHealthChecks omits the other forge's token check", async () => {
+    // The GitHub token is irrelevant on GitLab, but it was still reported as an
+    // optional check — so every GitLab CI run logged a confusing
+    // "⚠️ GitHub Token: GITHUB_TOKEN not set and gh CLI not authenticated".
+    execMock.mockResolvedValue({ stdout: "ok\n", stderr: "" });
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    process.env.GITLAB_TOKEN = "token";
+    const { runHealthChecks } = await import("../src/health.js");
+
+    const gitlab = await runHealthChecks({ platform: "gitlab" });
+    expect(gitlab.checks.find((c) => c.name === "GitHub Token")).toBeUndefined();
+    // The CLI availability probe is still useful and stays.
+    expect(gitlab.checks.find((c) => c.name === "GitHub CLI (gh)")).toBeDefined();
+
+    const github = await runHealthChecks({ platform: "github" });
+    expect(github.checks.find((c) => c.name === "GitLab Token")).toBeUndefined();
+    expect(github.checks.find((c) => c.name === "GitHub Token")).toBeDefined();
+  });
+
   it("runHealthChecks passes when required checks all pass", async () => {
     execMock.mockResolvedValue({ stdout: "ok\n", stderr: "" });
     process.env.ANTHROPIC_API_KEY = "sk-test";
