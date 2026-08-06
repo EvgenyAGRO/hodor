@@ -7,7 +7,9 @@ import {
   getHodorReviewShaCandidates,
   parseReviewFromAssistantText,
   parsePrUrl,
+  postGitlabReviewCommitStatus,
   resolveMaxAgentTurns,
+  resolveReviewMarkerSha,
 } from "../src/agent.js";
 import { formatMetricsMarkdown } from "../src/metrics.js";
 import type { ReviewMetrics } from "../src/types.js";
@@ -427,6 +429,49 @@ describe("buildEmbeddedDiffArgs", () => {
     expect(args).toEqual(["--no-pager", "diff", "deadbeef...HEAD"]);
   });
 
+  it("ends the incremental range at the source tip when given one", () => {
+    // On a merged-results pipeline HEAD is the merge commit, and the marker SHA
+    // is an ancestor of it — so `marker...HEAD` collapses to a two-dot diff that
+    // drags in everything merged to the target since the source last synced.
+    // Ending the range at the source tip keeps it source-only.
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: "deadbeef",
+      diffBaseSha: "1e8a628d",
+      localMode: false,
+      targetBranch: "develop",
+      sourceHeadRef: "3ab8514a9d11781d170b756b7aa0aec2b62b0827",
+    });
+    expect(args).toEqual([
+      "--no-pager",
+      "diff",
+      "deadbeef...3ab8514a9d11781d170b756b7aa0aec2b62b0827",
+    ]);
+  });
+
+  it("falls back to HEAD when no source tip is supplied (GitHub/Gitea)", () => {
+    for (const sourceHeadRef of [undefined, null, "", "   "]) {
+      const args = buildEmbeddedDiffArgs({
+        previousReviewSha: "deadbeef",
+        diffBaseSha: null,
+        localMode: false,
+        targetBranch: "main",
+        sourceHeadRef,
+      });
+      expect(args).toEqual(["--no-pager", "diff", "deadbeef...HEAD"]);
+    }
+  });
+
+  it("ignores the source tip for a full review", () => {
+    const args = buildEmbeddedDiffArgs({
+      previousReviewSha: null,
+      diffBaseSha: "1e8a628d",
+      localMode: false,
+      targetBranch: "develop",
+      sourceHeadRef: "3ab8514a",
+    });
+    expect(args).toEqual(["--no-pager", "diff", "1e8a628d", "HEAD"]);
+  });
+
   it("uses the CI diff base sha as a two-dot diff when no previous review", () => {
     const args = buildEmbeddedDiffArgs({
       previousReviewSha: null,
@@ -530,5 +575,103 @@ describe("resolveMaxAgentTurns", () => {
     expect(resolveMaxAgentTurns("-5")).toBe(25);
     expect(resolveMaxAgentTurns("abc")).toBe(25);
     expect(resolveMaxAgentTurns("NaN")).toBe(25);
+  });
+});
+
+describe("postGitlabReviewCommitStatus", () => {
+  const parsed = { owner: "coronet", repo: "bugatti/backend/java", prNumber: 7938, host: "gitlab.com" };
+  const diffRefs = {
+    base_sha: "a".repeat(40),
+    head_sha: "b".repeat(40),
+    start_sha: "c".repeat(40),
+  };
+  const makeReview = (priorities: number[]) => ({
+    findings: priorities.map((priority) => ({
+      title: `[P${priority}] finding`,
+      body: "body",
+      priority,
+      code_location: { absolute_file_path: "/x/y.ts", line_range: { start: 1, end: 1 } },
+    })),
+    overall_correctness: priorities.length ? "patch is incorrect" : "patch is correct",
+    overall_explanation: "explanation",
+  });
+  // Read the payload straight off the mock's call record rather than a shared
+  // module-level array, so these assertions can't be perturbed by other suites.
+  const lastPayload = async (): Promise<Record<string, unknown>> => {
+    const { exec } = await import("../src/utils/exec.js");
+    const calls = vi.mocked(exec).mock.calls;
+    const opts = calls[calls.length - 1]?.[2] as { input?: string } | undefined;
+    return JSON.parse(opts?.input ?? "{}");
+  };
+
+  it("fails the status when a truncated review found nothing", async () => {
+    // "No blocking issues" from a review that was cut off mid-analysis is an
+    // absence of evidence. Reporting success would greenlight the merge — the
+    // exact failure this release exists to surface.
+    await postGitlabReviewCommitStatus(parsed as never, makeReview([]) as never, diffRefs as never, {
+      truncated: true,
+    });
+    const payload = await lastPayload();
+    expect(payload.state).toBe("failed");
+    expect(String(payload.description)).toContain("Review incomplete");
+  });
+
+  it("succeeds on a complete review with no findings", async () => {
+    await postGitlabReviewCommitStatus(parsed as never, makeReview([]) as never, diffRefs as never);
+    expect((await lastPayload()).state).toBe("success");
+  });
+
+  it("grades by severity: P2/P3 pass, P0/P1 fail", async () => {
+    await postGitlabReviewCommitStatus(parsed as never, makeReview([2, 3]) as never, diffRefs as never);
+    expect((await lastPayload()).state).toBe("success");
+    await postGitlabReviewCommitStatus(parsed as never, makeReview([3, 1]) as never, diffRefs as never);
+    expect((await lastPayload()).state).toBe("failed");
+  });
+
+  it("binds the status to the running pipeline", async () => {
+    // Without pipeline_id GitLab attaches the status to whatever pipeline it
+    // finds for the SHA — and creates an `external` one when there is none,
+    // which is the norm on merged-results pipelines.
+    const previous = process.env.CI_PIPELINE_ID;
+    process.env.CI_PIPELINE_ID = "2729518905";
+    try {
+      await postGitlabReviewCommitStatus(parsed as never, makeReview([]) as never, diffRefs as never);
+      expect((await lastPayload()).pipeline_id).toBe(2729518905);
+    } finally {
+      if (previous === undefined) delete process.env.CI_PIPELINE_ID;
+      else process.env.CI_PIPELINE_ID = previous;
+    }
+  });
+
+  it("omits pipeline_id outside CI", async () => {
+    const previous = process.env.CI_PIPELINE_ID;
+    delete process.env.CI_PIPELINE_ID;
+    try {
+      await postGitlabReviewCommitStatus(parsed as never, makeReview([]) as never, diffRefs as never);
+      expect(await lastPayload()).not.toHaveProperty("pipeline_id");
+    } finally {
+      if (previous !== undefined) process.env.CI_PIPELINE_ID = previous;
+    }
+  });
+});
+
+describe("resolveReviewMarkerSha", () => {
+  const MERGE_COMMIT = "4938ea5ac612df24a487a8afd1c8595bbdb56d33";
+  const SOURCE_SHA = "3ab8514a9d11781d170b756b7aa0aec2b62b0827";
+
+  it("prefers the CI source-branch SHA over the ephemeral merge commit", () => {
+    // On refs/merge-requests/N/merge, HEAD is regenerated on every push, so
+    // recording it permanently disables incremental review.
+    expect(resolveReviewMarkerSha(SOURCE_SHA, MERGE_COMMIT)).toBe(SOURCE_SHA);
+  });
+
+  it("falls back to git HEAD outside a merge-request pipeline", () => {
+    expect(resolveReviewMarkerSha(undefined, MERGE_COMMIT)).toBe(MERGE_COMMIT);
+    expect(resolveReviewMarkerSha("", MERGE_COMMIT)).toBe(MERGE_COMMIT);
+    expect(resolveReviewMarkerSha("   ", MERGE_COMMIT)).toBe(MERGE_COMMIT);
+  });
+
+  it("trims whitespace from the CI value", () => {
+    expect(resolveReviewMarkerSha(`  ${SOURCE_SHA}\n`, MERGE_COMMIT)).toBe(SOURCE_SHA);
   });
 });

@@ -710,7 +710,7 @@ export async function postGitlabCommitStatus(
   sha: string,
   state: GitlabCommitStatusState,
   host?: string | null,
-  opts?: { name?: string; description?: string; targetUrl?: string },
+  opts?: { name?: string; description?: string; targetUrl?: string; pipelineId?: string | number },
 ): Promise<void> {
   const allowedStates = new Set<GitlabCommitStatusState>([
     "pending",
@@ -736,6 +736,16 @@ export async function postGitlabCommitStatus(
   }
   if (opts?.targetUrl) {
     payload.target_url = opts.targetUrl;
+  }
+  // Bind the status to a specific pipeline. Without this GitLab attaches it to
+  // whatever pipeline it can find for `sha` — and CREATES an `external` pipeline
+  // when there is none. That is the common case on a merged-results pipeline
+  // (refs/merge-requests/N/merge), where the pipeline's SHA is the ephemeral
+  // merge commit but the status targets the MR's diff head SHA: the stray
+  // external pipeline can then be picked up as the MR's head pipeline and mask
+  // the real test pipeline's status.
+  if (opts?.pipelineId !== undefined && opts.pipelineId !== null && `${opts.pipelineId}`.trim() !== "") {
+    payload.pipeline_id = Number(opts.pipelineId);
   }
 
   try {

@@ -3,6 +3,7 @@
  */
 
 import type { ReviewFinding, ReviewOutput } from "./types.js";
+import { relativizeWorkspacePath } from "./utils/path.js";
 
 export const HODOR_REVIEW_MARKER = "<!-- hodor-review -->";
 
@@ -65,10 +66,7 @@ export function renderMarkdown(review: ReviewOutput): string {
 
   // Overall verdict
   lines.push("### Overall Verdict");
-  const isCorrect = review.overall_correctness === "patch is correct";
-  lines.push(
-    `**Status**: ${isCorrect ? "Patch is correct" : "Patch has blocking issues"}`,
-  );
+  lines.push(`**Status**: ${verdictLabel(review)}`);
   lines.push("");
   if (review.overall_explanation) {
     lines.push(`**Explanation**: ${review.overall_explanation}`);
@@ -94,9 +92,8 @@ export function renderSummaryMarkdown(review: ReviewOutput): string {
   lines.push(`| Important (P2) | ${counts.important} |`);
   lines.push(`| Minor (P3) | ${counts.minor} |`);
 
-  const isCorrect = review.overall_correctness === "patch is correct";
   lines.push("");
-  lines.push(`**Overall verdict**: ${isCorrect ? "Patch is correct" : "Patch has blocking issues"}`);
+  lines.push(`**Overall verdict**: ${verdictLabel(review)}`);
   lines.push("");
   lines.push(`**Explanation**: ${review.overall_explanation}`);
 
@@ -114,6 +111,28 @@ export function renderSummaryMarkdown(review: ReviewOutput): string {
   return lines.join("\n").trimEnd() + "\n";
 }
 
+/**
+ * Human-readable verdict.
+ *
+ * `overall_correctness` is a bare boolean and the review template forces it to
+ * "patch is incorrect" whenever findings is non-empty, so a single P3 nit used
+ * to render as "Patch has blocking issues". Grade by severity instead, using the
+ * same P0/P1 threshold postGitlabReviewCommitStatus() gates merges on, so the
+ * comment and the commit status can never disagree.
+ */
+function verdictLabel(review: ReviewOutput): string {
+  const blocking = review.findings.filter((f) => f.priority <= 1).length;
+  if (blocking > 0) return "Patch has blocking issues";
+  if (review.findings.length > 0) return "Patch has non-blocking issues";
+  // Graded purely from findings, deliberately ignoring overall_correctness.
+  // validateReviewOutput() forces 0 findings => "patch is correct", so the two
+  // only diverge after postReviewStructured() dedupes already-posted findings
+  // away while keeping the original correctness. Honoring the stale boolean
+  // there would print "Patch has blocking issues" above a 0/0/0 table and
+  // contradict the commit status, which grades from findings too.
+  return "Patch is correct";
+}
+
 function formatFinding(f: ReviewFinding): string {
   const loc = ` (\`${formatLocation(f.code_location)}\`)`;
   const title = `- **${f.title}**${loc}`;
@@ -125,22 +144,12 @@ function formatLocation(loc: {
   absolute_file_path: string;
   line_range: { start: number; end: number };
 }): string {
-  // Strip common workspace prefixes to get a clean relative path
-  let filePath = loc.absolute_file_path;
-
-  // GitLab CI: /builds/owner/repo/src/file.ts → src/file.ts
-  const buildsMatch = filePath.match(/\/builds\/[^/]+\/[^/]+\/(.+)/);
-  if (buildsMatch) {
-    filePath = buildsMatch[1];
-  }
-  // GitHub Actions / generic workspace
-  else if (filePath.includes("/workspace/")) {
-    filePath = filePath.slice(filePath.indexOf("/workspace/") + "/workspace/".length);
-  }
-  // Temp review dirs: /tmp/hodor-review-<id>/src/file.ts → src/file.ts
-  else {
-    filePath = filePath.replace(/^.*\/hodor-review-[^/]+\//, "");
-  }
+  // Shared with inline comments and the CodeClimate artifact. The local copy
+  // this replaced hard-coded /builds/<group>/<project>/, which silently mangled
+  // nested GitLab subgroups: /builds/coronet/bugatti/backend/java/Products/x.java
+  // rendered as `backend/java/Products/x.java` instead of `Products/x.java`.
+  // relativizeWorkspacePath() honors CI_PROJECT_DIR first and gets this right.
+  const filePath = relativizeWorkspacePath(loc.absolute_file_path);
 
   const { start, end } = loc.line_range;
   return start === end ? `${filePath}:${start}` : `${filePath}:${start}-${end}`;

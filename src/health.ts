@@ -194,11 +194,14 @@ export async function runHealthChecks(opts: { platform?: Platform; skipOptional?
     ghCheck.required = true;
     githubTokenCheck.required = true;
     checks.push(ghCheck, githubTokenCheck);
-    if (!skipOptional) checks.push(glabCheck, gitlabTokenCheck);
+    // Only the CLI availability probe is worth running for the other forge —
+    // its *token* is irrelevant here, and reporting it produced a confusing
+    // "⚠️ GitLab Token: ... not set" warning on every run.
+    if (!skipOptional) checks.push(glabCheck);
   } else if (platform === "gitlab") {
     gitlabTokenCheck.required = true;
     checks.push(glabCheck, gitlabTokenCheck);
-    if (!skipOptional) checks.push(ghCheck, githubTokenCheck);
+    if (!skipOptional) checks.push(ghCheck);
   } else if (!skipOptional) {
     checks.push(ghCheck, githubTokenCheck, glabCheck, gitlabTokenCheck);
   }

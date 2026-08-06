@@ -82,6 +82,77 @@ describe("renderMarkdown", () => {
     };
     expect(renderMarkdown(review)).toContain("<!-- hodor-review -->");
   });
+
+  it("relativizes nested GitLab subgroup paths via CI_PROJECT_DIR", () => {
+    // /builds/<group>/<project>/ is only correct for a top-level project. On
+    // coronet/bugatti/backend/java it left two extra segments on every path.
+    const previous = process.env.CI_PROJECT_DIR;
+    process.env.CI_PROJECT_DIR = "/builds/coronet/bugatti/backend/java";
+    try {
+      const review: ReviewOutput = {
+        findings: [
+          {
+            title: "[P3] Misleading log message",
+            body: "Says network, means SWG.",
+            priority: 3,
+            code_location: {
+              absolute_file_path:
+                "/builds/coronet/bugatti/backend/java/Products/SMB/Server/SwgDemoDataInitializer.java",
+              line_range: { start: 32, end: 35 },
+            },
+          },
+        ],
+        overall_correctness: "patch is incorrect",
+        overall_explanation: "Minor logging nit.",
+      };
+      const md = renderMarkdown(review);
+      expect(md).toContain("`Products/SMB/Server/SwgDemoDataInitializer.java:32-35`");
+      expect(md).not.toContain("backend/java/Products");
+    } finally {
+      if (previous === undefined) delete process.env.CI_PROJECT_DIR;
+      else process.env.CI_PROJECT_DIR = previous;
+    }
+  });
+});
+
+describe("verdict grading", () => {
+  // The review template forces overall_correctness to "patch is incorrect" for
+  // ANY non-empty findings list, so grading the banner off that boolean labelled
+  // a lone P3 nit "Patch has blocking issues". Grade by severity instead, on the
+  // same P0/P1 threshold postGitlabReviewCommitStatus() gates merges on.
+  const cases: Array<[string, ReviewFinding[], ReviewOutput["overall_correctness"], string]> = [
+    ["no findings", [], "patch is correct", "Patch is correct"],
+    ["only P3", [makeFinding("nit", 3)], "patch is incorrect", "Patch has non-blocking issues"],
+    ["only P2", [makeFinding("perf", 2)], "patch is incorrect", "Patch has non-blocking issues"],
+    ["P3 and P1", [makeFinding("nit", 3), makeFinding("leak", 1)], "patch is incorrect", "Patch has blocking issues"],
+    ["P0", [makeFinding("injection", 0)], "patch is incorrect", "Patch has blocking issues"],
+  ];
+
+  for (const [name, findings, correctness, expected] of cases) {
+    it(`grades ${name} as "${expected}"`, () => {
+      const review: ReviewOutput = {
+        findings,
+        overall_correctness: correctness,
+        overall_explanation: "Explanation.",
+      };
+      expect(renderMarkdown(review)).toContain(`**Status**: ${expected}`);
+      expect(renderSummaryMarkdown(review)).toContain(`**Overall verdict**: ${expected}`);
+    });
+  }
+
+  it("ignores a stale overall_correctness when every finding was deduped away", () => {
+    // postReviewStructured() drops already-posted findings but keeps the
+    // original overall_correctness. Honoring that boolean would print "blocking
+    // issues" above a 0/0/0 table and disagree with the commit status, which
+    // grades from findings.
+    const review: ReviewOutput = {
+      findings: [],
+      overall_correctness: "patch is incorrect",
+      overall_explanation: "All findings were already reported on an earlier review.",
+    };
+    expect(renderMarkdown(review)).toContain("**Status**: Patch is correct");
+    expect(renderSummaryMarkdown(review)).toContain("**Overall verdict**: Patch is correct");
+  });
 });
 
 describe("renderSummaryMarkdown", () => {

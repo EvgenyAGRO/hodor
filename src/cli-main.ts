@@ -324,7 +324,7 @@ program
       log();
 
       streamLog(chalk.dim("▶ Setting up workspace..."));
-      const { review, metricsFooter, headSha, metrics, workspacePath } = await reviewPr({
+      const { review, metricsFooter, headSha, truncated, metrics, workspacePath } = await reviewPr({
         prUrl: localMode ? undefined : prUrl,
         model,
         reasoningEffort,
@@ -378,6 +378,7 @@ program
             commitStatus,
             headSha,
             workspacePath,
+            truncated,
           });
         } else {
           result = await postReviewComment({
@@ -398,7 +399,7 @@ program
                 parsed.prNumber,
                 parsed.host,
               );
-              await postGitlabReviewCommitStatus(parsed, review, diffRefs);
+              await postGitlabReviewCommitStatus(parsed, review, diffRefs, { truncated });
             } catch (err) {
               result = {
                 success: false,
