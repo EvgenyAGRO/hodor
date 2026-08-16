@@ -750,6 +750,94 @@ export class ToolErrorLoopError extends Error {
   }
 }
 
+/**
+ * Raised when the LLM call fails for a reason that is likely to succeed on a
+ * retry — a provider hiccup, not a misconfiguration. The CLI exits 75
+ * (EX_TEMPFAIL) for these so CI can reschedule the job, while genuine failures
+ * keep exit 1 and stay unretried.
+ */
+export class TransientAgentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientAgentError";
+  }
+}
+
+// Substrings that mark a provider-side failure worth retrying. Matched against
+// the agent's error message, lowercased.
+const TRANSIENT_ERROR_PATTERNS = [
+  "unknown error", // what a Gemini hiccup surfaces as; see the note below
+  "overloaded",
+  "service unavailable",
+  "internal error",
+  "internal server error",
+  "temporarily",
+  "try again",
+  "rate limit",
+  "too many requests",
+  "timeout",
+  "timed out",
+  "etimedout",
+  "econnreset",
+  "econnrefused",
+  "epipe",
+  "socket hang up",
+  "fetch failed",
+  "network",
+  "stream error",
+  "429",
+  "500",
+  "502",
+  "503",
+  "504",
+];
+
+// Substrings that mark a failure retrying cannot fix. Checked FIRST, so a
+// message carrying both (e.g. "invalid api key (500)") is treated as permanent.
+const PERMANENT_ERROR_PATTERNS = [
+  "api key",
+  "unauthorized",
+  "forbidden",
+  "permission",
+  "authentication",
+  "401",
+  "403",
+  "404",
+  "not found",
+  "insufficient_quota",
+  "insufficient quota",
+  "billing",
+  "payment",
+  "context length",
+  "context window",
+  "too long",
+  "unsupported",
+  "invalid request",
+];
+
+/**
+ * Decide whether an agent error is worth retrying.
+ *
+ * Conservative by construction: permanent markers win, and anything unrecognized
+ * is treated as permanent, so a new failure mode degrades to today's behavior
+ * (exit 1, no retry) rather than silently burning three full reviews.
+ *
+ * "unknown error" is deliberately on the transient list. It is vague, but it is
+ * how a real Gemini outage surfaced (common-configuration job 15920187322, which
+ * died after 27 completed turns and then succeeded unchanged on the third
+ * manual run). Retrying it is bounded by CI's `retry: max`, and the cost of not
+ * retrying is a developer re-running a blocking gate by hand.
+ */
+export function isTransientLlmError(message: string | undefined | null): boolean {
+  if (!message) return false;
+  const text = message.toLowerCase();
+  if (PERMANENT_ERROR_PATTERNS.some((p) => text.includes(p))) return false;
+  return TRANSIENT_ERROR_PATTERNS.some((p) => text.includes(p));
+}
+
+/** Exit code signalling "retry me" to CI. Mirrors sysexits.h EX_TEMPFAIL. */
+export const EXIT_TRANSIENT_FAILURE = 75;
+
 export interface ToolOutcome {
   isError: boolean;
   message: string;
@@ -1515,6 +1603,12 @@ export async function reviewPr(opts: {
           if (turnLimitReached) return;
           const agentError = session.state.errorMessage;
           if (agentError) {
+            // Distinguish a provider hiccup from a real misconfiguration so the
+            // CLI can exit 75 and let CI reschedule, instead of failing a
+            // blocking gate that a human then re-runs by hand.
+            if (isTransientLlmError(agentError)) {
+              throw new TransientAgentError(`LLM request failed (transient): ${agentError}`);
+            }
             throw new Error(`LLM request failed: ${agentError}`);
           }
         };

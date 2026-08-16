@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import "dotenv/config";
 
-import { detectPlatform, parsePrUrl, postGitlabReviewCommitStatus, postReviewComment, postReviewStructured, reviewPr } from "./agent.js";
+import { EXIT_TRANSIENT_FAILURE, TransientAgentError, detectPlatform, parsePrUrl, postGitlabReviewCommitStatus, postReviewComment, postReviewStructured, reviewPr } from "./agent.js";
 import type { AgentProgressEvent } from "./agent.js";
 import type { PostCommentResult } from "./types.js";
 import { renderMarkdown } from "./render.js";
@@ -452,6 +452,18 @@ program
       );
       if (verbose && err instanceof Error && err.stack) {
         console.error(chalk.dim(err.stack));
+      }
+      // A provider hiccup exits 75 (EX_TEMPFAIL) rather than 1, so CI can tell
+      // "reschedule me" from "this will fail again however often you run it" and
+      // reschedule only the former. Everything else keeps exit 1 and stays
+      // unretried, so a bad key or an exhausted quota cannot bill three reviews.
+      if (err instanceof TransientAgentError) {
+        console.error(
+          chalk.yellow(
+            `Exiting ${EXIT_TRANSIENT_FAILURE} (transient): this failure looks retryable, not a misconfiguration.`,
+          ),
+        );
+        process.exit(EXIT_TRANSIENT_FAILURE);
       }
       process.exit(1);
     }

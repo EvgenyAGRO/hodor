@@ -7,6 +7,7 @@ import {
   getHodorReviewShaCandidates,
   parseReviewFromAssistantText,
   parsePrUrl,
+  isTransientLlmError,
   postGitlabReviewCommitStatus,
   resolveMaxAgentTurns,
   resolveReviewMarkerSha,
@@ -675,3 +676,52 @@ describe("resolveReviewMarkerSha", () => {
     expect(resolveReviewMarkerSha(`  ${SOURCE_SHA}\n`, MERGE_COMMIT)).toBe(SOURCE_SHA);
   });
 });
+
+describe("isTransientLlmError", () => {
+  it("treats provider hiccups as retryable", () => {
+    for (const msg of [
+      "An unknown error occurred",
+      "The model is overloaded. Please try again later.",
+      "503 Service Unavailable",
+      "Internal server error",
+      "429 Too Many Requests",
+      "rate limit exceeded",
+      "request timed out",
+      "ECONNRESET",
+      "socket hang up",
+      "fetch failed",
+    ]) {
+      expect(isTransientLlmError(msg)).toBe(true);
+    }
+  });
+
+  it("treats misconfiguration as permanent — retrying cannot fix it", () => {
+    for (const msg of [
+      "Invalid API key provided",
+      "401 Unauthorized",
+      "403 Forbidden",
+      "model not found",
+      "insufficient_quota",
+      "billing account required",
+      "context length exceeded",
+      "invalid request: bad parameter",
+    ]) {
+      expect(isTransientLlmError(msg)).toBe(false);
+    }
+  });
+
+  it("lets a permanent marker win when a message carries both", () => {
+    // A 500 wrapping an auth failure is still an auth failure; retrying it three
+    // times would bill three full reviews for nothing.
+    expect(isTransientLlmError("500 Internal error: invalid api key")).toBe(false);
+    expect(isTransientLlmError("Service unavailable (403 forbidden)")).toBe(false);
+  });
+
+  it("defaults to permanent for anything unrecognized or empty", () => {
+    expect(isTransientLlmError("something we have never seen")).toBe(false);
+    expect(isTransientLlmError("")).toBe(false);
+    expect(isTransientLlmError(undefined)).toBe(false);
+    expect(isTransientLlmError(null)).toBe(false);
+  });
+});
+
