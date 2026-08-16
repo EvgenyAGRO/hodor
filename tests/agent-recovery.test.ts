@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reviewPr } from "../src/agent.js";
+import { TransientAgentError, reviewPr } from "../src/agent.js";
 
 const mocks = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
@@ -521,5 +521,50 @@ describe("reviewPr submit_review recovery", () => {
       if (previous === undefined) delete process.env.HODOR_MAX_TURNS;
       else process.env.HODOR_MAX_TURNS = previous;
     }
+  });
+  it.each([
+    ["transient", "An unknown error occurred", true],
+    ["permanent", "Invalid API key provided", false],
+  ])("classifies a %s LLM failure and throws the matching error type", async (_label, errorMessage, expectTransient) => {
+    // The agent errors out mid-run: pi-agent-core records it on state.errorMessage
+    // and produces no review. A provider hiccup must surface as TransientAgentError
+    // so the CLI exits 75 and CI reschedules; a bad key must not, or one broken
+    // config would bill a full review on every retry.
+    mocks.createAgentSession.mockImplementation(async () => {
+      const messages: Array<Record<string, unknown>> = [];
+      const state: Record<string, unknown> = {};
+      const subscribers: Array<(event: Record<string, unknown>) => void> = [];
+      return {
+        session: {
+          messages,
+          state,
+          subscribe: (s: (event: Record<string, unknown>) => void) => {
+            subscribers.push(s);
+            return () => {};
+          },
+          dispose: vi.fn(),
+          getLastAssistantText: () => "",
+          abort: vi.fn(async () => {}),
+          prompt: vi.fn(async (prompt: string) => {
+            mocks.prompts.push(prompt);
+            state.errorMessage = errorMessage;
+          }),
+        },
+      };
+    });
+
+    const run = reviewPr({
+      localMode: true,
+      workspaceDir: "/tmp/hodor-recovery",
+      cleanup: false,
+      model: "anthropic/test-model",
+      maxRetriesWhenStuck: 0,
+      skipLicenseCheck: true,
+    });
+
+    await expect(run).rejects.toThrow(/LLM request failed/);
+    await expect(run).rejects.toSatisfy(
+      (err: unknown) => err instanceof TransientAgentError === expectTransient,
+    );
   });
 });
